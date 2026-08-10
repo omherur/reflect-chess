@@ -1,0 +1,12 @@
+[Event "ReflectChess Sample - Tactical Blunder"]
+[Site "Local"]
+[Date "2024.03.15"]
+[Round "1"]
+[White "ChessFan88"]
+[Black "SeedPlayer"]
+[Result "1-0"]
+[TimeControl "600"]
+[ECO "C50"]
+[Opening "Italian Game"]
+
+1. e4 e5 2. Nf3 d6 3. Bc4 Bg4 4. Nc3 g6 5. Nxe5 Bxd1 6. Bxf7+ Ke7 7. Nd5# 1-0

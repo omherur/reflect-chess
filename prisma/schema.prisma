@@ -1,0 +1,207 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String         @id @default(cuid())
+  // Doubles as the lightweight login identifier — no password, "enter your
+  // name" is enough, but it must be unique so testers get distinct accounts.
+  name      String         @unique
+  createdAt DateTime       @default(now())
+  accounts  ChessAccount[]
+  games     Game[]
+  sessions  Session[]
+}
+
+// A logged-in browser session. The session id itself is the cookie value —
+// lightweight on purpose (no password), but still not a guessable/forgeable
+// value the way a raw userId in a cookie would be.
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
+
+model ChessAccount {
+  id       String @id @default(cuid())
+  platform String // "chesscom" (lichess later)
+  username String
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Set after each successful auto-sync, so future syncs can report "N new
+  // games" instead of just re-checking everything from scratch.
+  lastSyncedAt DateTime?
+
+  @@unique([platform, username, userId])
+}
+
+model Game {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform    String // "chesscom" | "manual"
+  externalId  String // platform game id, or PGN hash for manual imports
+  pgn         String
+  whitePlayer String
+  blackPlayer String
+  userColor   String // "white" | "black"
+  result      String // "1-0" | "0-1" | "1/2-1/2" | "*"
+  playedAt    DateTime?
+  timeControl String?
+  opening     String?
+
+  // PENDING | ANALYZING | ANALYZED | FAILED
+  analysisStatus   String  @default("PENDING")
+  analysisProgress Int     @default(0) // 0-100
+  analysisError    String?
+
+  // How the game ended, classified from the PGN's Termination header:
+  // checkmate | resignation | timeout | abandoned | agreement | other | null (unknown)
+  terminationReason String?
+
+  // The user's own rating for this game, parsed from the PGN's WhiteElo/
+  // BlackElo header (whichever side the user played). Null for manually
+  // pasted PGNs without rating headers.
+  userRating Int?
+
+  // Post-game summary — generated once, lazily, the first time every key
+  // moment in the game has been reviewed (see src/server/summary). Cached
+  // here rather than regenerated on every visit to the summary page, same
+  // reasoning as Reflection.explanation being generated once and stored.
+  // JSON-serialized StructuredGameSummary.
+  summary            String?
+  summaryGeneratedAt DateTime?
+
+  createdAt  DateTime    @default(now())
+  moves      GameMove[]
+  keyMoments KeyMoment[]
+
+  @@unique([userId, platform, externalId])
+}
+
+model GameMove {
+  id         String      @id @default(cuid())
+  gameId     String
+  game       Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  ply        Int // 1-based half-move index
+  moveNumber Int
+  color      String // "white" | "black"
+  san        String
+  uci        String
+  fenBefore  String
+  fenAfter   String
+  // Seconds remaining on the mover's clock AFTER this move, parsed from the
+  // PGN's %clk annotations when present (e.g. Chess.com imports).
+  clockSeconds Int?
+  keyMoments KeyMoment[]
+
+  @@unique([gameId, ply])
+}
+
+model KeyMoment {
+  id     String   @id @default(cuid())
+  gameId String
+  game   Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  moveId String
+  move   GameMove @relation(fields: [moveId], references: [id], onDelete: Cascade)
+
+  sortIndex Int // order within the game review (0-based)
+  ply       Int
+  fen       String // position before the move was played
+
+  originalSan String
+  originalUci String
+  bestMoveSan String
+  bestMoveUci String
+
+  // Evaluations are centipawns from White's perspective; mate distances override cp.
+  evalBeforeCp   Int?
+  evalBeforeMate Int?
+  evalAfterCp    Int?
+  evalAfterMate  Int?
+
+  selectionReason String
+  classification  String // BEST | GOOD | INACCURACY | MISTAKE | BLUNDER | MISSED_OPPORTUNITY | FORCED
+  principalVariation String // JSON array of SAN moves for the best line
+  conceptHighlights String @default("[]") // JSON array of {concept, note, squares}
+
+  // Importance ranking, computed at analysis time.
+  importanceScore Int    @default(0) // 0-100
+  importanceTier  String @default("MINOR") // CRITICAL | NOTABLE | MINOR
+
+  // PENDING | REVIEWED
+  reviewStatus String      @default("PENDING")
+  reflection   Reflection?
+  createdAt    DateTime    @default(now())
+
+  @@unique([gameId, sortIndex])
+}
+
+model Reflection {
+  id          String    @id @default(cuid())
+  keyMomentId String    @unique
+  keyMoment   KeyMoment @relation(fields: [keyMomentId], references: [id], onDelete: Cascade)
+
+  thoughts      String // raw free-text reasoning captured before reveal
+  replaySame    Boolean @default(false) // user chose "I'd play the same move"
+  replayMoveSan String
+  replayMoveUci String
+
+  // How confident the player felt in the move, 1 (a total guess) to 5 (certain) —
+  // captured before reveal, alongside the reasoning and replay move. Default
+  // only exists so adding this column to existing rows doesn't require a
+  // backfill; new submissions always provide it (enforced in the API route).
+  confidence Int @default(3)
+
+  // Optional, multi-select quick-tags describing the thinking that led to
+  // this move (e.g. "I was rushing"). JSON array of strings.
+  tags String @default("[]")
+
+  // A single adaptive follow-up question, generated when the initial
+  // reasoning was too thin to learn anything from, asked at most once per
+  // key moment. Null/empty when the initial answer was already substantive.
+  followUpQuestion String?
+  followUpAnswer   String?
+
+  replayEvalCp   Int?
+  replayEvalMate Int?
+  replayVerdict  String? // IMPROVEMENT | SAME_AS_ORIGINAL | SAME_AS_BEST | WORSE | SIMILAR
+
+  // Generated only once both reflection questions are answered — it's
+  // personalized to this specific reasoning + replay move, so it can't be
+  // computed any earlier. JSON-serialized StructuredExplanation.
+  explanation String @default("{}")
+
+  createdAt DateTime @default(now())
+}
+
+// Engine analysis cache, keyed by position + analysis settings.
+model AnalysisCache {
+  id        String   @id @default(cuid())
+  fen       String
+  settings  String // e.g. "d12mpv3"
+  result    String // JSON-serialized engine result
+  createdAt DateTime @default(now())
+
+  @@unique([fen, settings])
+}
+
+// A pre-launch email signup from the landing page. Deliberately not tied to
+// User — someone joining the waitlist hasn't created an account, and may
+// never; the two lists are independent.
+model WaitlistSignup {
+  id String @id @default(cuid())
+  // Stored normalized (trimmed + lowercased) so the unique constraint
+  // actually dedupes — "Me@Example.com " and "me@example.com" are one person.
+  email String @unique
+  // Which CTA the signup came from, so separate placements can be compared
+  // later without a schema change.
+  source    String   @default("landing")
+  createdAt DateTime @default(now())
+}
