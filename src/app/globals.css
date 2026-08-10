@@ -1,26 +1,259 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
+/*
+ * Warm chess-club theme: a well-used wooden set and an old chess book, not
+ * a generic tech dashboard. Two anchors drive everything below —
+ * parchment/cream (#FAF6EF) and warm near-black brown (#2A2320) — with a
+ * walnut primary accent, a forest-green "success" accent, and a severity
+ * family (oxblood/ochre/tan/forest-green) that's used consistently for
+ * blunder/mistake/inaccuracy/good-best everywhere in the app.
+ */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-body);
   --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-heading-serif);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+
+  /* Classification/severity family — see :root and .dark for light/dark
+     values. BLUNDER intentionally reuses --color-destructive instead of a
+     dedicated variable. */
+  --color-severity-best: var(--severity-best);
+  --color-severity-good: var(--severity-good);
+  --color-severity-inaccuracy: var(--severity-inaccuracy);
+  --color-severity-inaccuracy-text: var(--severity-inaccuracy-text);
+  --color-severity-mistake: var(--severity-mistake);
+  --color-severity-mistake-text: var(--severity-mistake-text);
+  --color-severity-missed-opportunity: var(--severity-missed-opportunity);
+  --color-severity-time-trouble: var(--severity-time-trouble);
+
+  /* The stone-* scale is remapped below to a warm sandstone→walnut ramp —
+     every existing `text-stone-600` / `bg-stone-50` / `border-stone-200`
+     usage across the app picks up the new warm palette automatically. */
+  --color-stone-50: var(--stone-50);
+  --color-stone-100: var(--stone-100);
+  --color-stone-200: var(--stone-200);
+  --color-stone-300: var(--stone-300);
+  --color-stone-400: var(--stone-400);
+  --color-stone-500: var(--stone-500);
+  --color-stone-600: var(--stone-600);
+  --color-stone-700: var(--stone-700);
+  --color-stone-800: var(--stone-800);
+  --color-stone-900: var(--stone-900);
+  --color-stone-950: var(--stone-950);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  /* Warm sandstone → walnut ramp, replacing Tailwind's default stone scale. */
+  --stone-50: #faf6ef;
+  --stone-100: #f2ecdf;
+  --stone-200: #e6dbc3;
+  --stone-300: #d2c2a0;
+  --stone-400: #b3a17e;
+  --stone-500: #8f7c5f;
+  --stone-600: #6e5d45;
+  --stone-700: #574937;
+  --stone-800: #3d332a;
+  --stone-900: #2a2320;
+  --stone-950: #1b1613;
+
+  --background: var(--stone-50);
+  --foreground: var(--stone-900);
+  --card: #fffdf8;
+  --card-foreground: var(--stone-900);
+  --popover: #fffdf8;
+  --popover-foreground: var(--stone-900);
+  --primary: #6f4518;
+  --primary-foreground: #faf6ef;
+  --secondary: var(--stone-200);
+  --secondary-foreground: var(--stone-800);
+  --muted: var(--stone-100);
+  --muted-foreground: var(--stone-600);
+  --accent: var(--stone-200);
+  --accent-foreground: var(--stone-900);
+  /* Destructive shares the same oxblood used for BLUNDER severity everywhere else. */
+  --destructive: #8b2e2e;
+  --success: #2f4f3d;
+  --success-foreground: #faf6ef;
+  /* Severity family — BLUNDER intentionally uses --destructive above, not a
+     separate variable, so the two stay unified by construction. */
+  --severity-best: #3b6b4e;
+  --severity-good: #2f4f3d;
+  --severity-inaccuracy: #d4b96b;
+  --severity-inaccuracy-text: #8a6d1f;
+  --severity-mistake: #b8860b;
+  --severity-mistake-text: #8a6108;
+  --severity-missed-opportunity: #6b4a6b;
+  --severity-time-trouble: #4a6178;
+  --border: #ddd0b4;
+  --input: #ddd0b4;
+  --ring: var(--stone-400);
+  --chart-1: #6f4518;
+  --chart-2: #2f4f3d;
+  --chart-3: #b8860b;
+  --chart-4: #8b2e2e;
+  --chart-5: var(--stone-500);
+  /* Modest corner radii — page/card feel, not rounded app bubbles. */
+  --radius: 0.4rem;
+  --sidebar: var(--stone-100);
+  --sidebar-foreground: var(--stone-900);
+  --sidebar-primary: #6f4518;
+  --sidebar-primary-foreground: #faf6ef;
+  --sidebar-accent: var(--stone-200);
+  --sidebar-accent-foreground: var(--stone-900);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--stone-400);
+
+  /* Brand mark — the two halves of the split king. The logo's identity is
+     "gold half / bright half, mirrored," so both halves are theme-aware:
+     against parchment the bright half has to be a dark warm neutral (a white
+     king would simply disappear), and against the dark reading-room
+     background it becomes the silver of the original artwork. The gold side
+     holds roughly steady, just lifted in dark mode the way --primary is. */
+  --brand-gold-1: #d9ae67;
+  --brand-gold-2: #b3792f;
+  --brand-gold-3: #8a5a22;
+  --brand-silver-1: #6b5d4e;
+  --brand-silver-2: #4a3f36;
+  --brand-silver-3: #2a2320;
+}
+
+/* "A reading room at night" — same warm mood, not a generic inverted theme. */
+.dark {
+  --stone-50: #1b1613;
+  --stone-100: #241d17;
+  --stone-200: #3d332a;
+  --stone-300: #574937;
+  /* stone-400/500 brightened vs. a straight mirror of the light ramp — the
+     mirrored values (#6e5d45 / #8f7c5f) read as "warm and dim" in a book but
+     fall below WCAG AA (4.5:1) as small secondary-label text on this dark
+     background, which is exactly the muted "AWAITING"-style text reported
+     as too dim to read. Brightened here so every text-stone-400/500 usage
+     across the app clears 4.5:1 against both --background and --card. */
+  --stone-400: #9a8767;
+  --stone-500: #ab9873;
+  --stone-600: #b3a17e;
+  --stone-700: #d2c2a0;
+  --stone-800: #e6dbc3;
+  --stone-900: #f2ecdf;
+  --stone-950: #faf6ef;
+
+  --background: #1c1712;
+  --foreground: var(--stone-900);
+  --card: #241e18;
+  --card-foreground: var(--stone-900);
+  --popover: #241e18;
+  --popover-foreground: var(--stone-900);
+  /* Brightened vs. a literal light-mode inversion (#a3691f-ish) — the naive
+     dark-mode primary narrowly failed 4.5:1 when used as text (e.g. accent
+     icons, "text-primary") against --card. */
+  --primary: #c08636;
+  --primary-foreground: #1c1712;
+  --secondary: #3d332a;
+  --secondary-foreground: #f2ecdf;
+  --muted: #2a241d;
+  --muted-foreground: #b3a17e;
+  --accent: #3d332a;
+  --accent-foreground: #f2ecdf;
+  /* Brightened so text-destructive (badges) clears 4.5:1 on its own tinted
+     background — also kept equal to --severity-blunder below, preserving
+     the light-mode "shares the same oxblood as BLUNDER" unification. */
+  --destructive: #e88b87;
+  --success: #7fbd9c;
+  --success-foreground: #1c1712;
+  --severity-best: #6fcb94;
+  --severity-good: #5aaf80;
+  --severity-inaccuracy: #e3c46b;
+  --severity-inaccuracy-text: #e3c46b;
+  --severity-mistake: #d9a93d;
+  --severity-mistake-text: #d9a93d;
+  --severity-missed-opportunity: #c79fc7;
+  --severity-time-trouble: #8fb4d1;
+  --border: #3d332a;
+  --input: #3d332a;
+  --ring: #8f7c5f;
+  --chart-1: #b3792f;
+  --chart-2: #4f7a63;
+  --chart-3: #d4a72c;
+  --chart-4: #c0524f;
+  --chart-5: #8f7c5f;
+  --sidebar: #241e18;
+  --sidebar-foreground: #f2ecdf;
+  --sidebar-primary: #c08636;
+  --sidebar-primary-foreground: #1c1712;
+  --sidebar-accent: #3d332a;
+  --sidebar-accent-foreground: #f2ecdf;
+  --sidebar-border: #3d332a;
+  --sidebar-ring: #8f7c5f;
+
+  /* The original artwork's palette: warm gold against true silver, both on
+     near-black. Only in dark mode does the bright half get to be silver. */
+  --brand-gold-1: #f0d09a;
+  --brand-gold-2: #c9963f;
+  --brand-gold-3: #9c6a28;
+  --brand-silver-1: #ffffff;
+  --brand-silver-2: #d8dade;
+  --brand-silver-3: #9aa0a8;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
   }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  /* Extend the wordmark's serif treatment to every heading in the app. */
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-heading;
+  }
 }
