@@ -54,7 +54,36 @@ export interface ParsedMove {
   clockSeconds?: number | null;
 }
 
+/**
+ * The layer a player reads first: the whole verdict in three short lines,
+ * scannable in a few seconds so a game can be reviewed at the pace of a
+ * game rather than the pace of an essay.
+ *
+ * Short is not the same as shallow — each line still has to name the
+ * concrete thing (a square, a piece, a principle), because a summary that
+ * only says "this was inaccurate" leaves the player exactly where they
+ * started. The deeper fields below stay one click away for when three lines
+ * genuinely aren't enough.
+ */
+export interface ExplanationSummary {
+  /** What actually happened, in one sentence. */
+  headline: string;
+  /** Why the engine's move is stronger, in one sentence. */
+  betterMove: string;
+  /** The lesson, in a short clause. */
+  takeaway: string;
+}
+
 export interface StructuredExplanation {
+  /**
+   * Optional only for backwards compatibility: explanations generated
+   * before the summary layer existed are stored as JSON on the reflection
+   * and can't gain fields retroactively. Read it through
+   * `explanationSummary()` in lib/explanation-summary.ts, which derives a
+   * summary from the deep fields when this is absent, rather than testing
+   * for it at each call site.
+   */
+  summary?: ExplanationSummary;
   whatYourMoveDid: string;
   whatItMissed: string;
   whyBestIsBetter: string;

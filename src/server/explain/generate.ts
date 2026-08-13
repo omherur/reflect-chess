@@ -1,5 +1,6 @@
 import { formatScore, describeScore } from "@/lib/chess/eval";
-import type { ConceptHighlight, StructuredExplanation } from "@/lib/types";
+import { firstSentence } from "@/lib/explanation-summary";
+import type { ConceptHighlight, ExplanationSummary, StructuredExplanation } from "@/lib/types";
 import { computeApproximate } from "./concepts";
 import { LOW_CLOCK_SECONDS } from "@/server/analysis/key-moments";
 import { recordExplanation } from "./monitor";
@@ -33,6 +34,11 @@ export class TemplateExplanationProvider implements ExplanationProvider {
 
     if (classification === "TIME_TROUBLE") {
       return {
+        summary: {
+          headline: `${originalSan} was played with ${clockSecondsAtMove}s left — there was no time here to look for anything better.`,
+          betterMove: `${bestSan} was the engine's choice, but the fix for this one is on the clock, not the board.`,
+          takeaway: "Once the clock gets this low, play simple and fast rather than precise.",
+        },
         whatYourMoveDid: `${originalSan} was played with the clock running out — ${clockSecondsAtMove}s left is barely enough time to look at the board, let alone calculate.`,
         whatItMissed: `This isn't really about what the move missed on the board — it's that there was no time left to look for anything better. The position itself may have still had options in it.`,
         whyBestIsBetter: `${bestSan} was the engine's suggestion here, but the real fix isn't a better move in this exact spot — it's more time on the clock earlier in the game.`,
@@ -65,6 +71,7 @@ export class TemplateExplanationProvider implements ExplanationProvider {
     const replayNote = describeReplay(input);
 
     return {
+      summary: summarize(input, sameMove, whatYourMoveDid, remember),
       whatYourMoveDid,
       whatItMissed,
       whyBestIsBetter,
@@ -74,6 +81,54 @@ export class TemplateExplanationProvider implements ExplanationProvider {
       approximate: computeApproximate(classification, concepts),
     };
   }
+}
+
+/**
+ * The three-line layer the player reads first, built deterministically.
+ *
+ * It is assembled from the same verified facts as the long fields rather
+ * than by shortening them: the first detected concept already names the
+ * piece and square in one sentence, and inferPrinciple already knows which
+ * idea is at stake, so both compress honestly. `remember` is reused as the
+ * takeaway because it is already written as one lesson — but only its first
+ * sentence, since the clock-context wrapper can prepend a second one.
+ */
+function summarize(
+  input: ExplainInput,
+  sameMove: boolean,
+  whatYourMoveDid: string,
+  remember: string
+): ExplanationSummary {
+  const { originalSan, bestSan, bestUci, classification, conceptHighlights } = input;
+  const concept = conceptHighlights[0];
+  const principle = inferPrinciple(bestUci, bestSan, conceptHighlights);
+
+  let headline: string;
+  if (sameMove) {
+    headline = `${originalSan} was the strongest move on the board here.`;
+  } else if (concept) {
+    headline = `After ${originalSan}, ${concept.note}.`;
+  } else if (classification === "FORCED" || classification === "BEST" || classification === "GOOD") {
+    headline = whatYourMoveDid;
+  } else {
+    // No verified concept to point at. Naming only the severity ("gave up a
+    // small amount of your advantage") tells the player nothing they can
+    // use, so the principle at stake goes in the headline instead — it's
+    // the most concrete thing that can be said here without inventing a
+    // mechanism this provider can't actually see.
+    headline = `${originalSan} cost you some ground here, and the difference is about ${principle.name}.`;
+  }
+
+  let betterMove: string;
+  if (sameMove) {
+    betterMove = `${bestSan} was your own move — the engine picked it too.`;
+  } else if (classification === "FORCED") {
+    betterMove = "There was no alternative here to compare against.";
+  } else {
+    betterMove = `${bestSan} is about ${principle.name}: it ${principle.clause}.`;
+  }
+
+  return { headline, betterMove, takeaway: firstSentence(remember) };
 }
 
 /**

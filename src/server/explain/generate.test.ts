@@ -11,6 +11,16 @@ const HANGING_PIECE: ConceptHighlight = {
   squares: ["d1"],
 };
 
+/** A response with every field the parser requires, to vary one at a time. */
+const VALID_RESPONSE = {
+  summary: { headline: "h", betterMove: "b", takeaway: "t" },
+  whatYourMoveDid: "a",
+  whatItMissed: "b",
+  whyBestIsBetter: "c",
+  remember: "d",
+  replayNote: "e",
+};
+
 const BASE_INPUT: ExplainInput = {
   fenBefore: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
   originalSan: "Bxd1",
@@ -44,6 +54,38 @@ describe("TemplateExplanationProvider", () => {
     expect(result.remember.length).toBeGreaterThan(0);
     expect(result.replayNote).toContain("dxe5");
     expect(result.concepts).toEqual(["hanging piece"]);
+  });
+
+  it("produces a summary layer that names the concrete thing, not just a verdict", async () => {
+    const result = await provider.explainMove(BASE_INPUT);
+    const summary = result.summary;
+    expect(summary).toBeDefined();
+    // The headline has to carry the actual finding — the square and the
+    // fact — since a player who reads only this layer gets nothing from
+    // "this was a blunder".
+    expect(summary?.headline).toContain("d1");
+    expect(summary?.headline).toContain("undefended");
+    expect(summary?.betterMove).toContain("dxe5");
+    expect(summary?.takeaway?.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the summary short enough to scan", async () => {
+    const result = await provider.explainMove(BASE_INPUT);
+    const summary = result.summary!;
+    // Roughly the three lines' word limits from the prompt. This is the
+    // whole point of the layer — if it grows to paragraph length the fast
+    // review path is gone.
+    expect(summary.headline.split(/\s+/).length).toBeLessThanOrEqual(30);
+    expect(summary.betterMove.split(/\s+/).length).toBeLessThanOrEqual(35);
+    expect(summary.takeaway.split(/\s+/).length).toBeLessThanOrEqual(30);
+  });
+
+  it("never puts an evaluation number in the summary", async () => {
+    const result = await provider.explainMove(BASE_INPUT);
+    const summary = result.summary!;
+    const joined = `${summary.headline} ${summary.betterMove} ${summary.takeaway}`;
+    expect(joined).not.toMatch(/engine:/i);
+    expect(joined).not.toMatch(/[+-]\d+\.\d/);
   });
 
   it("grounds 'what it missed' in the concrete note and square, not just the bare tag", async () => {
@@ -319,6 +361,44 @@ describe("Claude system prompt — mechanism requirement", () => {
   });
 });
 
+describe("Claude system prompt — the two-layer requirement", () => {
+  it("tells the model the summary is read first and must stand on its own", () => {
+    expect(SYSTEM_PROMPT).toMatch(/TWO LAYERS/i);
+    expect(SYSTEM_PROMPT).toMatch(/SELF-SUFFICIENT/i);
+    expect(SYSTEM_PROMPT).toMatch(/Explain more/i);
+  });
+
+  it("gives each summary line an explicit length limit", () => {
+    const section = SYSTEM_PROMPT.split("TWO LAYERS")[1];
+    for (const line of ["headline", "betterMove", "takeaway"]) {
+      expect(section).toContain(`"${line}"`);
+    }
+    expect(section).toMatch(/25 words maximum/);
+    expect(section).toMatch(/15 words maximum/);
+  });
+
+  it("bans the eval number from the summary outright, not just as a headline reason", () => {
+    expect(SYSTEM_PROMPT).toMatch(/Never put an evaluation number anywhere in the summary/i);
+  });
+
+  it("tells the model to drop true-but-immaterial facts rather than pad with them", () => {
+    expect(SYSTEM_PROMPT).toMatch(/CUT WHATEVER ISN'T LOAD-BEARING/i);
+    expect(SYSTEM_PROMPT).toMatch(/adequately defended/i);
+    expect(SYSTEM_PROMPT).toMatch(/better to say one thing that matters/i);
+  });
+
+  it("shows a summary in every worked example, so the standard is demonstrated not just stated", () => {
+    // Each worked example is one JSON object opening with a summary. If an
+    // example is ever added without one, the model is being shown a shape
+    // the parser will reject.
+    const examples = SYSTEM_PROMPT.split('"whatYourMoveDid":').length - 1;
+    const summaries = SYSTEM_PROMPT.split('"summary": {').length - 1;
+    expect(examples).toBeGreaterThanOrEqual(3);
+    // Both counts include the one mention in the OUTPUT FORMAT spec.
+    expect(summaries).toBe(examples - 1);
+  });
+});
+
 describe("Claude system prompt — underlying principle requirement", () => {
   it("requires naming a chess principle in whyBestIsBetter, with a fixed vocabulary", () => {
     expect(SYSTEM_PROMPT).toMatch(/NAME THE UNDERLYING CHESS PRINCIPLE/i);
@@ -377,27 +457,14 @@ describe("Claude provider prompt + response parsing", () => {
   });
 
   it("parses a clean JSON response", () => {
-    const parsed = parseResponse(
-      JSON.stringify({
-        whatYourMoveDid: "a",
-        whatItMissed: "b",
-        whyBestIsBetter: "c",
-        remember: "d",
-        replayNote: "e",
-      })
-    );
+    const parsed = parseResponse(JSON.stringify(VALID_RESPONSE));
     expect(parsed.whatYourMoveDid).toBe("a");
     expect(parsed.replayNote).toBe("e");
+    expect(parsed.summary.headline).toBe("h");
   });
 
   it("strips markdown code fences before parsing", () => {
-    const text = "```json\n" + JSON.stringify({
-      whatYourMoveDid: "a",
-      whatItMissed: "b",
-      whyBestIsBetter: "c",
-      remember: "d",
-      replayNote: "e",
-    }) + "\n```";
+    const text = "```json\n" + JSON.stringify(VALID_RESPONSE) + "\n```";
     const parsed = parseResponse(text);
     expect(parsed.whatYourMoveDid).toBe("a");
   });
@@ -410,16 +477,25 @@ describe("Claude provider prompt + response parsing", () => {
 
   it("throws when a required field is empty", () => {
     expect(() =>
-      parseResponse(
-        JSON.stringify({
-          whatYourMoveDid: "",
-          whatItMissed: "b",
-          whyBestIsBetter: "c",
-          remember: "d",
-          replayNote: "e",
-        })
-      )
+      parseResponse(JSON.stringify({ ...VALID_RESPONSE, whatYourMoveDid: "" }))
     ).toThrow();
+  });
+
+  it("throws when the summary layer is missing entirely", () => {
+    // The summary is what nearly every player reads, so a response without
+    // one goes down the logged fallback path rather than being silently
+    // patched up from the detail fields.
+    const withoutSummary: Record<string, unknown> = { ...VALID_RESPONSE };
+    delete withoutSummary.summary;
+    expect(() => parseResponse(JSON.stringify(withoutSummary))).toThrow(/summary/);
+  });
+
+  it("throws when a summary line is empty", () => {
+    expect(() =>
+      parseResponse(
+        JSON.stringify({ ...VALID_RESPONSE, summary: { ...VALID_RESPONSE.summary, takeaway: "" } })
+      )
+    ).toThrow(/summary\.takeaway/);
   });
 
   it("throws on malformed JSON so the caller can fall back", () => {
