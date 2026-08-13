@@ -1,5 +1,5 @@
 import type { StructuredExplanation } from "@/lib/types";
-import { applyGrounding, findGroundingViolations } from "./concepts";
+import { applyGrounding, findGroundingViolations, verifiedConceptVocabulary } from "./concepts";
 import { recordExplanation } from "./monitor";
 import type { ExplainContext, ExplainInput, ExplanationProvider } from "./types";
 
@@ -44,7 +44,16 @@ export class FallbackExplanationProvider implements ExplanationProvider {
       return fallbackResult;
     }
 
-    const originalConcepts = input.conceptHighlights.map((c) => c.concept);
+    // The allow-list is what the BOARD supports, not what the UI chose to
+    // show. The displayed concepts are a strict subset — see
+    // verifiedConceptVocabulary for the case where using the subset alone
+    // silently gutted three of four fields.
+    const verified = verifiedConceptVocabulary(
+      input.fenBefore,
+      input.originalUci,
+      input.principalVariationSan
+    );
+    const originalConcepts = [...input.conceptHighlights.map((c) => c.concept), ...verified];
     const replayConcepts = input.replayConceptHighlights.map((c) => c.concept);
     const violations = findGroundingViolations(primaryResult, originalConcepts, replayConcepts);
     if (violations.length === 0) {

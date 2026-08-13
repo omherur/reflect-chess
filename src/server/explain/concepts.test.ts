@@ -8,6 +8,7 @@ import {
   filterRelevantConcepts,
   uciSquares,
   pvSquaresFromSan,
+  verifiedConceptVocabulary,
 } from "./concepts";
 import type { StructuredExplanation } from "@/lib/types";
 
@@ -84,13 +85,41 @@ describe("findConcepts — pin", () => {
     expect(highlights.find((h) => h.concept === "pin")).toBeUndefined();
   });
 
-  it("false-positive trap: does not flag a pin when two pieces block the line (attacker can't see through either)", () => {
+  it("false-positive trap: never claims a piece is pinned to the KING when two pieces block that line", () => {
     // White bishop g1, diagonal to black king c5, but BOTH d4 and e3 are
-    // occupied — even though d4 is a black piece, the bishop's view is cut
-    // off earlier by e3, so nothing is actually pinned.
+    // occupied — the bishop's view of the king is cut off at e3, so nothing
+    // is pinned against the king.
+    //
+    // The e3 pawn IS pinned against the knight on d4 behind it, which is a
+    // relative pin and correctly reported as one. What must never appear is
+    // the king in that sentence: a piece pinned to the king cannot legally
+    // move at all, and saying so of a piece that can would be false.
     const fen = "8/8/8/2k5/3n4/4p3/8/6BK w - - 0 1";
-    const highlights = findConcepts(fen, "b");
-    expect(highlights.find((h) => h.concept === "pin")).toBeUndefined();
+    const pin = findConcepts(fen, "b").find((h) => h.concept === "pin");
+    expect(pin?.note ?? "").not.toMatch(/king/i);
+    expect(pin?.squares ?? []).not.toContain("c5");
+  });
+
+  it("detects a relative pin — a piece shielding something more valuable than itself", () => {
+    // The single most common pin in chess, and one no detector could
+    // confirm until now: Bg5 pinning the f6 knight against the queen on d8.
+    const chess = new Chess("r1bqk2r/pppp1ppp/1bn2n2/4p3/2BPP3/2P2N2/PP3PPP/RNBQK2R w KQkq - 1 6");
+    chess.move("Bg5");
+    // Examined with White still to move, because the detectors read the
+    // side to move's threats and this pin is White's own. In the real game
+    // it's Black's turn here, which is why verifiedConceptVocabulary has to
+    // look from both sides — covered separately below.
+    const fields = chess.fen().split(" ");
+    fields[1] = "w";
+    fields[3] = "-";
+    const pin = findConcepts(fields.join(" "), "b", { requireMaterial: false }).find(
+      (h) => h.concept === "pin"
+    );
+    expect(pin).toBeDefined();
+    expect(pin?.squares).toEqual(expect.arrayContaining(["g5", "f6", "d8"]));
+    // It can move — it just costs the queen. Only an absolute pin immobilizes.
+    expect(pin?.note).toContain("losing");
+    expect(pin?.note).not.toMatch(/king/i);
   });
 
   it("does not flag a pin when the sliding piece already attacks the king directly (that's check, not a pin)", () => {
@@ -411,6 +440,77 @@ describe("findGroundingViolations", () => {
 
   it("does not fail on an explanation stored before the summary layer existed", () => {
     expect(findGroundingViolations(explanation({ summary: undefined }), [], [])).toEqual([]);
+  });
+});
+
+describe("verifiedConceptVocabulary", () => {
+  // The position from a real reveal where three of the four explanation
+  // fields were replaced with template text. A hanging piece IS present
+  // after Bg5 — the relevance filter dropped it, the stored concept list
+  // came out empty, and every tactical word the model wrote then counted
+  // as unverified.
+  const FEN = "r1bqk2r/pppp1ppp/1bn2n2/4p3/2BPP3/2P2N2/PP3PPP/RNBQK2R w KQkq - 1 6";
+  const PV = ["Nxe5", "Nxe5", "dxe5", "Nxe4", "Bxf7+", "Kxf7"];
+
+  it("includes a concept the relevance filter dropped from the display list", () => {
+    const vocabulary = verifiedConceptVocabulary(FEN, "c1g5", PV);
+    expect(vocabulary).toContain("hanging piece");
+  });
+
+  it("lets that explanation keep its own prose instead of falling to the template", () => {
+    const written = explanation({
+      whatItMissed: "The pawn on e5 was hanging — Nxe5 simply takes it.",
+    });
+    // What the check used to be handed: the stored (empty) display list.
+    expect(findGroundingViolations(written, [], [])).toEqual([
+      { field: "whatItMissed", concept: "hanging piece" },
+    ]);
+    // What it is handed now.
+    expect(findGroundingViolations(written, verifiedConceptVocabulary(FEN, "c1g5", PV), [])).toEqual(
+      []
+    );
+  });
+
+  it("still rejects a tactic that is nowhere on the board or in the line", () => {
+    // No fork exists in this position or anywhere in its principal
+    // variation, so the guarantee that matters is intact: widening the
+    // vocabulary to what the board supports does not let the model invent
+    // a tactic the board doesn't support.
+    const invented = explanation({ whatItMissed: "You missed a fork on e5." });
+    const vocabulary = verifiedConceptVocabulary(FEN, "c1g5", PV);
+    expect(vocabulary).not.toContain("fork");
+    expect(findGroundingViolations(invented, vocabulary, [])).toEqual([
+      { field: "whatItMissed", concept: "fork" },
+    ]);
+  });
+
+  it("includes the relative pin the player themselves described", () => {
+    // The reflection on this exact moment read "pinning the knight to the
+    // queen". The model wrote the same thing and had it overwritten,
+    // because no detector could confirm a pin against anything but a king.
+    expect(verifiedConceptVocabulary(FEN, "c1g5", PV)).toContain("pin");
+  });
+
+  it("survives a move or line it cannot replay", () => {
+    expect(() => verifiedConceptVocabulary(FEN, "a1a8", ["totally-not-a-move"])).not.toThrow();
+    expect(verifiedConceptVocabulary(FEN, "a1a8", ["totally-not-a-move"])).toEqual([]);
+  });
+});
+
+describe("findGroundingViolations — verb forms", () => {
+  it("catches an unverified pin however it is phrased", () => {
+    // "pins" was missing from the pattern, so the same claim was caught or
+    // waved through depending on the verb form the model happened to use.
+    for (const text of [
+      "Bg5 pins the knight to the queen.",
+      "Bg5 pinned the knight.",
+      "Bg5 is pinning the knight.",
+      "That is a pin on the knight.",
+    ]) {
+      expect(findGroundingViolations(explanation({ whatItMissed: text }), [], [])).toEqual([
+        { field: "whatItMissed", concept: "pin" },
+      ]);
+    }
   });
 });
 
