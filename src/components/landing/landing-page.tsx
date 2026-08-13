@@ -96,12 +96,12 @@ export function LandingPage() {
           </p>
 
           <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <Link href="/login" className="w-full sm:w-auto">
+            <Link href="/signup" className="w-full sm:w-auto">
               <Button size="lg" className={PRIMARY_CTA_CLASS}>
                 Get started — it&apos;s free!
               </Button>
             </Link>
-            <Link href="/login?demo=1" className="w-full sm:w-auto">
+            <Link href="/signup?demo=1" className="w-full sm:w-auto">
               <Button size="lg" variant="outline" className={SECONDARY_CTA_CLASS}>
                 Analyze a free demo game
               </Button>
@@ -237,7 +237,7 @@ export function LandingPage() {
           <h2 className="text-2xl font-semibold tracking-tight">
             Play your next game. Write down what you were thinking. See what you find.
           </h2>
-          <Link href="/login">
+          <Link href="/signup">
             <Button size="lg" className={PRIMARY_CTA_CLASS}>
               Get started — it&apos;s free!
             </Button>
