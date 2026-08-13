@@ -41,7 +41,7 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **next-themes** for dark mode (wired to a `ThemeProvider` + header toggle button).
-- **Vitest** for tests (273 tests / 17 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
+- **Vitest** for tests (332 tests / 21 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
 
 ---
 
@@ -115,12 +115,13 @@ Two SVG gotchas this cost time on, worth not rediscovering: a `*/` inside a bloc
 | Navbar auth state | **Working** | Signed out shows **Sign in** (ghost) + **Sign up** (primary); signed in shows the display name and a **Sign out** button. Display name is derived from the email's local part at first sign-in and is cosmetic only |
 | **IDOR fix** | **Fixed & verified** | All game-scoped routes (`/api/games/[id]`, `.../analyze`, `.../reflect`, `.../hint`) now check `game.userId === user.id`; previously did not |
 | Key-moment detection/selection | **Working, recently overhauled** | Now uses **win-probability** (`winProbLoss` in `src/lib/chess/eval.ts`, Lichess-style logistic curve), not raw centipawn delta, as the significance metric. Verified live: some games now correctly surface fewer key moments than the old minimum guarantee would have padded to |
-| Concept detection (pin/fork/skewer/hanging piece/back-rank/king exposure) | **Working, hardened** | Each detector verified against real chess rules (color, line-of-sight, alignment) with true-positive + false-positive-trap test coverage. A real bug (mixed-color "pin" through a blocking pawn) was found and fixed with a permanent regression test |
+| Concept detection (pin/fork/skewer/hanging piece/back-rank/king exposure) | **Working, hardened, now materiality-gated** | Each detector verified against real chess rules (color, line-of-sight, alignment) with true-positive + false-positive-trap coverage. A real bug (mixed-color "pin" through a blocking pawn) was found and fixed with a permanent regression test. **Being geometrically real is no longer sufficient** — see §10: a tactic whose targets are adequately defended wins nothing and is now dropped, via a static exchange evaluation in `src/server/explain/exchange.ts` |
 | Concept **relevance filtering** | **Working** | `filterRelevantConcepts` in `src/server/explain/concepts.ts` — a concept only survives if spatially connected to the move played, the best move, or the immediate PV. Fixes concepts like back-rank weakness being mentioned when irrelevant to the specific move |
 | Reflection capture (reasoning + replay move) | **Working** | Two-question core mechanic, gate-verified repeatedly |
 | Reflection capture — confidence/tags/follow-up/voice | **Working, recently added** | 1-5 confidence (required), 6 optional tags, adaptive one-shot follow-up for thin answers, Web Speech API voice input (graceful no-op on unsupported browsers via `useSyncExternalStore`, not a hydration-unsafe effect). The "settle on this move over other options" follow-up question is skipped when the replay move equals the original — nothing to explain there |
-| Explanation generation | **Working via Claude, verified live** | See §6 — was broken for two independent reasons (missing key, then an adaptive-thinking token-budget bug), both fixed and verified with real API calls. "Why the recommended move is stronger" now names an underlying chess principle (center control, king safety, piece activity, etc.), not just a restated eval. The replay move gets a distinct scannable verdict badge (Matches best / Improvement / Equal to original / etc.) plus explicit acknowledgment in prose |
-| Reveal panel layout | **Working, recently restructured** | "Your reasoning"/"Your replay move" (+ confidence dots, tags, follow-up) now render in a quote-styled block at the top of the reveal, above the four AI-explanation cards |
+| Explanation generation | **Working via Claude, verified live, now two-layer** | See §6 — was broken for two independent reasons (missing key, then an adaptive-thinking token-budget bug), both fixed and verified with real API calls. "Why the recommended move is stronger" now names an underlying chess principle (center control, king safety, piece activity, etc.), not just a restated eval. The replay move gets a distinct scannable verdict badge (Matches best / Improvement / Equal to original / etc.) plus explicit acknowledgment in prose |
+| Reveal panel layout | **Working, restructured again** | "Your reasoning"/"Your replay move" (+ confidence dots, tags, follow-up) render in a quote-styled block at the top. Below it the reveal now opens on a **three-line summary** beside the board; the four AI cards, eval numbers, engine line and concept list sit behind an **Explain more** button — see §10 |
+| Reveal progress bar | **Working, new** | The reflect route streams NDJSON stage events while it works, and the form shows a real staged progress bar instead of a static "Revealing…" — see §10. Verified that Next 16 + Turbopack flushes the events incrementally rather than buffering them |
 | Pre-reveal focused view | **Working** | Move list + sidebar visually dim (`opacity-40`, brightens on hover) while a key moment is still `PENDING` |
 | Hint button | **Working** | Non-revealing, deterministic + concept-flavored, never names a move or shows eval |
 | Dashboard (grid, thumbnails, bulk analyze, filters, sort, momentum) | **Working** | Includes the "N thoughts recorded" persistent counter (distinct from the 3 stat cards) |
@@ -187,9 +188,10 @@ Note: hydration errors in Next 16 dev surface **only in the dev-tools overlay**,
 ## 7. Next Steps / Open Work
 
 1. **Voice input** has only been feature-detection-tested (mic icon appears/disappears correctly); actual speech-to-text transcription accuracy has not been verified live (no real microphone input in this environment).
-2. **Concept-relevance filter is sometimes overly strict.** `filterRelevantConcepts` occasionally drops a real, correct tactic (observed: a genuine pin) because its squares weren't judged "connected enough" to the move/PV, causing the grounding check to unnecessarily patch otherwise-good AI explanation fields back to template text. Not fixed — a real gap, low frequency.
-3. General note: `src/proxy.ts` gates **everything** not in `PUBLIC_PREFIXES` behind a session — any new route meant for signed-out visitors (a public API, a static asset served from `app/`) must be added there, or it silently 401s/redirects to `/login`. This bit both `/api/waitlist` and `/icon.svg` when they were added.
-4. General note: after any schema change, remember the non-interactive `prisma migrate dev` limitation in §2 — use the manual diff+deploy workaround, not `migrate dev` directly. Also remember: **the running dev server's Prisma Client is loaded once at process start** — after `npx prisma generate`, the dev server must be restarted (not just hot-reloaded) or it'll throw "Unknown field" errors against the new schema.
+2. **Concept-relevance filter is sometimes overly strict.** `filterRelevantConcepts` occasionally drops a real, correct tactic (observed: a genuine pin) because its squares weren't judged "connected enough" to the move/PV. With an empty verified-concept list, any tactical word the model uses then counts as a grounding violation and gets patched back to template text. Still unfixed, but it now hurts less: `applyGrounding` prefers the model's own *surviving* prose over the template when replacing a summary line (§10).
+3. **The signed-in reveal flow has not been clicked through since the §10 changes.** The summary layer, the "Explain more" toggle and the progress bar were verified by unit tests, by a real Claude run against real dev-DB moments, and by confirming the route streams incrementally — but not by a human-eye pass of the rendered panel, because doing so requires signing in and Claude may not enter a password. Worth one look.
+4. General note: `src/proxy.ts` gates **everything** not in `PUBLIC_PREFIXES` behind a session — any new route meant for signed-out visitors (a public API, a static asset served from `app/`) must be added there, or it silently 401s/redirects to `/login`. This bit both `/api/waitlist` and `/icon.svg` when they were added.
+5. General note: after any schema change, remember the non-interactive `prisma migrate dev` limitation in §2 — use the manual diff+deploy workaround, not `migrate dev` directly. Also remember: **the running dev server's Prisma Client is loaded once at process start** — after `npx prisma generate`, the dev server must be restarted (not just hot-reloaded) or it'll throw "Unknown field" errors against the new schema.
 
 ---
 
@@ -237,3 +239,41 @@ Email/password auth via **Supabase Auth**; application data stays in local Prism
 **Migration note:** this replaced password-less name login outright, by explicit decision. Pre-existing rows (`Om`, `Local Player`) are still in the dev database with their games, but have no `supabaseUserId` and are therefore unreachable — nobody can sign in as them. They are not a bug; deleting them is safe whenever you want the database tidy.
 
 ---
+
+## 10. The Two-Layer Verdict, and What Counts as a Finding
+
+Three changes that share one goal: a player should be able to review a whole game at the pace of a game, and everything they read should be worth reading.
+
+### Only material tactics are reported
+
+A tactic can be geometrically real and worth nothing. The dev database had **38 stored "skewers" and every one of them was noise** — variations on "the White queen on h5 attacks the Black pawn on g5, which must move and expose the Black pawn on d5 behind it". A queen does not force a defended pawn to move.
+
+`src/server/explain/exchange.ts` adds a static exchange evaluation: play the cheapest legal capture onto a square, recurse for the recapture, clamp at zero because either side may stop. It enumerates **legal** moves, not geometric attackers, so a pinned attacker correctly threatens nothing. Each detector is now gated on it:
+
+- **hanging piece** — undefended *and* actually winnable.
+- **fork** — still needs two targets, but at least one has to be worth taking. Knight forking two defended rooks: reported. Knight forking two defended knights: dropped.
+- **pin** — the pinned piece must be winnable now, or attackers must at least match defenders (a pinned piece can't run, so matching is enough to win it by piling on).
+- **skewer** — the front piece must be under a real threat, and what's behind it must be worth a knight or more.
+- Findings are capped at **three** per moment.
+
+Measured over the whole dev DB, apples-to-apples through the same relevance filter: skewer 38 → 0, hanging 30 → 28, pin 8 → 7, fork 3 → 2, back-rank and king exposure unchanged (no material gate applies to them). Moments carrying at least one finding: 70 → 45. The detector is not dead — scanning all 6,462 stored positions still finds 10 skewers, all genuine piece-behind-piece shapes.
+
+**If you loosen a gate, re-run that audit before believing the result.** The first version of the skewer gate counted the front piece as a defender of the piece behind it, which silently suppressed the single most common real skewer there is (a queen in front of a rook — the queen "defends" it right up until it has to run). Only the existing true-positive test caught it.
+
+### The verdict is read in two layers
+
+`StructuredExplanation` gained an optional `summary` of three short lines: `headline`, `betterMove`, `takeaway`. The reveal panel opens on those, beside the board, and puts the four detail cards, the eval numbers, the engine line and the concept list behind an **Explain more** button.
+
+- **`summary` is optional purely for backwards compatibility** — explanations generated before this are stored as JSON on their reflection and can't gain fields. Always read it through `explanationSummary()` in `src/lib/explanation-summary.ts`, which derives one from the deep fields when it's missing, so the two cases are indistinguishable at the call site. Never read `explanation.summary` directly.
+- The Claude provider **requires** the summary and throws without it, so a missing one takes the logged fallback path and shows up on `/admin/explanations` rather than being silently patched over. The prompt gained a two-layers section (with per-line word limits, and a ban on eval numbers in the summary) and a "cut whatever isn't load-bearing" section; all three worked examples now include a summary.
+- The grounding check covers the summary too, addressed as `summary.headline` etc. When a summary line has to be replaced, `applyGrounding` **prefers the model's own surviving deep field** (headline ← `whatItMissed`, betterMove ← `whyBestIsBetter`, takeaway ← `remember`) over the template's generic line — that text passed the identical check, and the summary is the layer everyone reads. Verified live: a patched headline went from "Qc7 gave up a small amount of your advantage" to "Qc7 develops safely, but it skips the chance to trade off White's active knight on c3 with tempo."
+- Splitting the layers costs nothing at runtime: the deep fields were always generated in the same call and are already on the client. Nobody is shown a shallower analysis, only a differently ordered one.
+
+### The wait is now legible
+
+Submitting a reflection runs a Stockfish evaluation and then a Claude call — often over ten seconds behind a button that just said "Revealing…". The reflect route now streams **newline-delimited JSON** stage events (`checking` → `explaining` → `saving` → `done`) as it reaches them, and the form shows a staged progress bar.
+
+- Everything that can fail fast (validation, ownership, move legality, already-reviewed) still returns a normal JSON error with a status code. Past that point the response is committed to 200, so **later failures arrive as an error *event*, not a status** — `readRevealStream` in `src/lib/reveal-stream.ts` has to handle that or a failed reveal looks like a success with a missing verdict.
+- Stage labels are ground truth from the server; only the movement between two announcements is estimated. Each stage eases toward a ceiling short of 100, so the bar can never sit at "done" while work is still running.
+- `toClientView` is still the only serializer — streaming changed how the verdict reaches the client, not what the client may see.
+- Verified with a temporary public route that Next 16 + Turbopack flushes each event as it's enqueued rather than buffering the response whole.
