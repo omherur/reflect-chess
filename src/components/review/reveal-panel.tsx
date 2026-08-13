@@ -8,11 +8,13 @@ import { explanationSummary } from "@/lib/explanation-summary";
 import {
   classificationClass,
   classificationLabel,
+  moveFraming,
+  moveWasTheFault,
   replayVerdictBadgeClass,
   replayVerdictBadgeLabel,
   tierLabel,
 } from "@/lib/format";
-import type { Color, ExplanationSummary, KeyMomentVerdict } from "@/lib/types";
+import type { Color, ExplanationSummary, KeyMomentVerdict, LineStep } from "@/lib/types";
 import { ReviewBoard } from "./review-board";
 import { ExplanationCard } from "@/components/explanation-card";
 import {
@@ -59,18 +61,31 @@ export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor
 
   return (
     <div className="flex flex-col gap-6 duration-500 animate-in fade-in-0 slide-in-from-bottom-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span
-          className={`rounded-full border px-3 py-1 text-sm font-semibold shadow-sm ${classificationClass(km.classification)}`}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`rounded-full border px-3 py-1 text-sm font-semibold shadow-sm ${classificationClass(km.classification)}`}
+          >
+            {classificationLabel(km.classification)}
+          </span>
+          <span
+            className={`rounded-full border px-2.5 py-1 text-xs font-medium ${TIER_BADGE_CLASS[km.importanceTier]}`}
+          >
+            {tierLabel(km.importanceTier)} moment
+          </span>
+          <span className="text-sm text-stone-500">{km.selectionReason}</span>
+        </div>
+        {/* Answers the question a player has before any other: do I need to
+            stop playing this move, or was it fine and I missed something
+            better? A "Good move" badge above a "winning chances dropped"
+            line reads as a contradiction until this says which it is. */}
+        <p
+          className={`text-base font-medium ${
+            moveWasTheFault(km.classification) ? "text-destructive" : "text-stone-700"
+          }`}
         >
-          {classificationLabel(km.classification)}
-        </span>
-        <span
-          className={`rounded-full border px-2.5 py-1 text-xs font-medium ${TIER_BADGE_CLASS[km.importanceTier]}`}
-        >
-          {tierLabel(km.importanceTier)} moment
-        </span>
-        <span className="text-sm text-stone-500">{km.selectionReason}</span>
+          {moveFraming(km.classification)}
+        </p>
       </div>
 
       <YourWordsSection km={km} />
@@ -108,6 +123,13 @@ export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor
           </div>
 
           <QuickVerdict summary={summary} />
+
+          {km.explanation.lineWalkthrough && (
+            <EngineLineWalkthrough
+              bestMoveSan={km.bestMoveSan}
+              steps={km.explanation.lineWalkthrough}
+            />
+          )}
 
           {km.explanation.approximate && (
             <p className="text-xs italic text-stone-500">
@@ -162,6 +184,42 @@ function QuickVerdict({
         <Sparkles className="mt-0.5 size-4 shrink-0 text-[#6B4A6B]" />
         <p className="text-sm leading-snug text-stone-700">{summary.takeaway}</p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The engine's line, annotated a move at a time.
+ *
+ * Raw notation is unreadable at a glance when the line opens with a
+ * concession — "Nd7 Qxd5 a6 Nc3 c6" looks like handing over a pawn for
+ * nothing unless someone says that c6 then hits the queen and the knight
+ * together. This sits in the first layer, next to the board, because
+ * "why would I allow that?" is the question a player has while looking at
+ * the position, not after opening a second panel.
+ */
+function EngineLineWalkthrough({
+  bestMoveSan,
+  steps,
+}: {
+  bestMoveSan: string;
+  steps: LineStep[];
+}) {
+  return (
+    <div className="rounded-lg border border-[#2F4F3D]/25 bg-[#2F4F3D]/[0.06] p-3">
+      <p className="mb-2 text-xs font-medium tracking-wide text-stone-500 uppercase">
+        How {bestMoveSan} plays out
+      </p>
+      <ol className="flex flex-col gap-1.5">
+        {steps.map((step, index) => (
+          <li key={`${step.move}-${index}`} className="flex items-baseline gap-2.5 text-sm">
+            <span className="min-w-[3.25rem] shrink-0 font-mono font-semibold text-stone-800">
+              {step.move}
+            </span>
+            <span className="text-stone-600">{step.note}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

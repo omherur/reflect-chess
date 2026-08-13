@@ -46,6 +46,38 @@ export function classificationLabel(classification: string): string {
   return CLASSIFICATION_LABEL[classification] ?? classification;
 }
 
+/**
+ * The one thing a player wants to know before reading anything else: was
+ * the move I played a mistake, or was it fine and I simply missed a
+ * stronger idea? Those call for completely different reactions, and the
+ * panel used to leave it implicit — a "Good move" badge sitting above a
+ * "your winning chances dropped 11 points" line and four cards headed
+ * "What it missed" reads as a contradiction until you've read all of it.
+ *
+ * Deterministic on purpose: it comes straight from the classification the
+ * engine already assigned, so it can never disagree with the badge beside
+ * it the way generated prose can.
+ */
+const MOVE_FRAMING: Record<string, string> = {
+  BEST: "Your move was right — this is the engine's own choice.",
+  GOOD: "Your move was sound. The engine just had a stronger idea available.",
+  FORCED: "Nothing to decide here — this was the only legal move.",
+  INACCURACY: "Your move was playable, but a better plan was there.",
+  MISSED_OPPORTUNITY: "Your move wasn't the problem — you missed a much stronger option.",
+  MISTAKE: "This move itself was the mistake.",
+  BLUNDER: "This move itself was the mistake, and an expensive one.",
+  TIME_TROUBLE: "This was about the clock, not the position.",
+};
+
+export function moveFraming(classification: string): string {
+  return MOVE_FRAMING[classification] ?? "";
+}
+
+/** Whether the move itself was the fault, as opposed to a missed idea. */
+export function moveWasTheFault(classification: string): boolean {
+  return classification === "MISTAKE" || classification === "BLUNDER";
+}
+
 // One coherent severity family, reused for badges, left-edge strips, and
 // tier indicators alike: oxblood (blunder/critical), ochre (mistake),
 // muted tan-gold (inaccuracy), forest green (good/best). Missed-opportunity
