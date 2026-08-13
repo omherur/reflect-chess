@@ -7,25 +7,26 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// The application's record of a person. Identity itself lives in Supabase
+// Auth — this row exists so games, reflections and Chess.com links have
+// something local to hang off, and is created the first time an
+// authenticated user is seen (see src/server/auth.ts).
 model User {
-  id        String         @id @default(cuid())
-  // Doubles as the lightweight login identifier — no password, "enter your
-  // name" is enough, but it must be unique so testers get distinct accounts.
-  name      String         @unique
+  id String @id @default(cuid())
+  // Display name only. No longer unique and no longer a login identifier:
+  // two people may reasonably both be "Om", and identity is proven by
+  // Supabase now, not by typing a name.
+  name String
+  // The Supabase auth user id — the stable link between this row and the
+  // identity. Nullable because local fixtures and the seed script create
+  // users that never authenticate; a real signed-in user always has one.
+  supabaseUserId String? @unique
+  // Mirrored from Supabase for display and the admin view, so listing
+  // accounts doesn't require a call out to the auth API.
+  email     String?        @unique
   createdAt DateTime       @default(now())
   accounts  ChessAccount[]
   games     Game[]
-  sessions  Session[]
-}
-
-// A logged-in browser session. The session id itself is the cookie value —
-// lightweight on purpose (no password), but still not a guessable/forgeable
-// value the way a raw userId in a cookie would be.
-model Session {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now())
 }
 
 model ChessAccount {

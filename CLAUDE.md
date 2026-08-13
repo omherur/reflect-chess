@@ -38,15 +38,17 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
 - **react-chessboard ^5.10.0** for the interactive board; a hand-rolled unicode-glyph `MiniBoard` (no react-chessboard) for lightweight dashboard thumbnails.
 - **Stockfish 18 WASM** via a Node child process (`src/server/engine/runner.cjs`, UCI protocol). Wrapped in `src/server/engine/engine.ts`'s `StockfishService` — **a single lazy global singleton with one serialized request queue**. This is important context for the open batch-analysis issue below (see §7).
 - **Claude API** (`@anthropic-ai/sdk`) for personalized explanation generation — model is **`claude-sonnet-5`** (upgraded from Haiku; Sonnet was deliberately chosen since explanation quality is the core product value). Automatic fallback to a deterministic template provider on any failure or missing key. **`ANTHROPIC_API_KEY` is configured and the AI path is verified working live** (see §6 — this was broken for two independent reasons, both fixed). **Important:** `claude-sonnet-5` defaults to adaptive extended thinking when the `thinking` param is omitted, and thinking tokens draw from the same `max_tokens` budget as the answer — always pass `thinking: { type: "disabled" }` on calls that need a reliable structured-JSON answer (see `src/server/explain/claude-provider.ts` and `src/server/summary/claude-provider.ts`), or a call can silently return empty text with `stop_reason: "max_tokens"`.
+- **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
+- **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **next-themes** for dark mode (wired to a `ThemeProvider` + header toggle button).
-- **Vitest** for tests (260 tests / 16 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
+- **Vitest** for tests (273 tests / 17 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
 
 ---
 
 ## 3. Data Model (`prisma/schema.prisma`)
 
-- **User** — `name` (unique, doubles as the password-less login identifier), owns `games`, `accounts`, `sessions`.
-- **Session** — session-cookie-value-as-row-id. No password; login is "enter a name."
+- **User** — the application's record of a person. Identity itself lives in **Supabase Auth**; this row is the local anchor for `games` and `accounts`. `supabaseUserId` (unique, nullable) is the link, `email` is mirrored from Supabase for display and the admin view, and `name` is now **display-only** — not unique, not a login identifier. Nullable auth fields exist so the seed script and test fixtures can create users that never authenticate.
+- **Session** — *removed*. Supabase manages sessions via its own cookies; there is no local session table any more.
 - **ChessAccount** — links a `User` to a Chess.com `username`; `lastSyncedAt` drives incremental auto-sync.
 - **Game** — one imported/synced game. `analysisStatus` (`PENDING|ANALYZING|ANALYZED|FAILED`) + `analysisProgress` (0-100) drive the UI polling. `terminationReason` (parsed from the PGN `Termination` header: checkmate/resignation/timeout/abandoned/agreement/other) and `userRating` (parsed from `WhiteElo`/`BlackElo`) support time-trouble handling and the Performance tab respectively. `summary`/`summaryGeneratedAt` cache the post-game summary (JSON-serialized `StructuredGameSummary`), generated once lazily the first time every key moment is reviewed — see `src/server/summary/`.
 - **GameMove** — one ply. `clockSeconds` is the mover's clock reading after the move, parsed from PGN `%clk` annotations when present (real Chess.com imports have this; manually pasted PGNs usually don't).
@@ -108,7 +110,9 @@ Two SVG gotchas this cost time on, worth not rediscovering: a `*/` inside a bloc
 |---|---|---|
 | Chess.com import (manual PGN paste + `/import`) | **Working** | `src/lib/import/chesscom.ts`, candidate dedup by `externalId` |
 | Auto-sync on dashboard load | **Working** | `POST /api/sync`, fires once per mount if a `ChessAccount` is linked, verified live |
-| Login / multi-user | **Working** | Password-less name-based login, verified isolation between users, verified the IDOR fix (see below) holds |
+| Login / multi-user | **Working, replaced** | **Email/password via Supabase Auth** (§9), verified live end to end: sign up → session → demo game seeded → sign out → sign back in to the same account. Replaced password-less name login outright; `getCurrentUser()` kept its signature so the ~24 guarded routes were untouched, and the IDOR fix still holds since ownership checks key off `user.id` |
+| Google sign-in | **Working, new** | "Continue with Google" / "Sign up with Google" on both auth pages, via `supabase.auth.signInWithOAuth`. Verified: the real button redirects to `accounts.google.com`, and Supabase's authorize endpoint issues the correct `client_id` (`4677653866…apps.googleusercontent.com`), scopes `email profile`, authorization-code flow with `state`. The consent step itself was not completed — that would mean authenticating as the owner's own Google account |
+| Navbar auth state | **Working** | Signed out shows **Sign in** (ghost) + **Sign up** (primary); signed in shows the display name and a **Sign out** button. Display name is derived from the email's local part at first sign-in and is cosmetic only |
 | **IDOR fix** | **Fixed & verified** | All game-scoped routes (`/api/games/[id]`, `.../analyze`, `.../reflect`, `.../hint`) now check `game.userId === user.id`; previously did not |
 | Key-moment detection/selection | **Working, recently overhauled** | Now uses **win-probability** (`winProbLoss` in `src/lib/chess/eval.ts`, Lichess-style logistic curve), not raw centipawn delta, as the significance metric. Verified live: some games now correctly surface fewer key moments than the old minimum guarantee would have padded to |
 | Concept detection (pin/fork/skewer/hanging piece/back-rank/king exposure) | **Working, hardened** | Each detector verified against real chess rules (color, line-of-sight, alignment) with true-positive + false-positive-trap test coverage. A real bug (mixed-color "pin" through a blocking pawn) was found and fixed with a permanent regression test |
@@ -189,14 +193,47 @@ Note: hydration errors in Next 16 dev surface **only in the dev-tools overlay**,
 
 ---
 
-## 8. Admin Access — Why It's a Key, Not a Role
+## 8. Admin Access — An Email Allowlist
 
-`/admin` and `/admin/explanations` are gated by `src/server/admin-auth.ts`, which checks a secret, **not an identity**.
+`/admin` and `/admin/explanations` are gated by `isAdminUser()` in `src/server/admin-auth.ts`, which checks the signed-in user's email against the `ADMIN_EMAILS` allowlist (comma-separated, env only). Currently: `om.herur@gmail.com`.
 
-This is the important bit, and it's easy to get wrong later: **login is password-less** — you become an account by typing its name. So any check of the form `user.name === "Om"`, or an `isAdmin` boolean on `User`, is bypassed by typing that name into the login box. In this app a name is an identifier, not a credential, and cannot gate anything.
+**This only became a safe design once real auth landed, and the history is worth keeping.** Under password-less login an account was claimed by typing its name, so `user.name === "Om"` was bypassed by typing "Om" — identity proved nothing, and admin had to be gated by a shared `ADMIN_KEY` secret with an unlock cookie. Since §9, Supabase verifies a password, so the question "who is this" finally has a trustworthy answer, and the key plus its unlock route, form and lock button were deleted.
 
-So admin access requires knowing `ADMIN_KEY` (env only, never in the database, minimum 16 characters). Unlocking via `POST /api/admin/unlock` sets an httpOnly `rc_admin` cookie holding `sha256("reflectchess-admin-v1:" + key)` — a *derived* token, so a stolen cookie can't be replayed as the key itself. `DELETE` on the same route locks again. Twelve-hour cookie, crude per-process attempt throttle (10 failures → 5-minute lockout).
+The email compared is the one **mirrored from Supabase onto the local row at sign-in** — not anything the user can set — which is what makes the check meaningful.
 
-**Fails closed on purpose:** with `ADMIN_KEY` unset, blank, or under 16 characters, `adminEnabled()` is false and *nobody* gets in, including you — a misconfigured deploy gets a locked admin area rather than an open one. `src/server/admin-auth.test.ts` locks in every one of these cases (13 tests), including that a correct-but-too-short key is still rejected.
+- **Fails closed:** `ADMIN_EMAILS` unset or empty ⇒ nobody is an admin, including you.
+- **A non-admin gets a 404, not a 403**, so the page's existence isn't confirmed to someone who can't use it.
+- The **API route is gated too** (`/api/admin/explanations` → 403). Gating only the page would leave the data one fetch away.
+- The header's **Admin link renders only for allowlisted users**.
+- `src/server/admin-auth.test.ts` (14 tests) covers the fail-closed cases and near-miss addresses — different domain, plus-addressed, gmail dot-trick, sub/superstrings — all rejected; casing and whitespace ignored.
 
-If a real admin role is ever wanted, the prerequisite is real authentication (passwords or OAuth) — not a column on `User`.
+To add an admin, append to `ADMIN_EMAILS` and restart. **Env changes need a server restart** — they're read at process start.
+
+---
+
+## 9. Authentication (Supabase)
+
+Email/password auth via **Supabase Auth**; application data stays in local Prisma/SQLite. Supabase is used for identity only — no app tables live there.
+
+- `src/lib/supabase/client.ts` (browser) and `server.ts` (server components + route handlers), both on `@supabase/ssr`. Env: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — both public by design.
+- `src/server/auth.ts` — `getCurrentUser()` keeps the **same signature it had before** (local `User` row or null), which is why the ~24 routes and pages that guard on it needed no changes at all. It calls `supabase.auth.getUser()` (**not** `getSession()` — `getUser` revalidates the token with Supabase, while `getSession` trusts a cookie that is attacker-supplied input on the server), then finds-or-creates the local row by `supabaseUserId`.
+- **The local row is created lazily on first read**, not at sign-up, because sign-up isn't the only path a first session can arrive by (a confirmation link, or a session restored on another device, both skip it). Creating it is also what triggers `seedDemoGame`, so the "your first game comes back analyzed" promise survives the auth change.
+- `src/proxy.ts` does double duty: it gates non-public paths **and refreshes the Supabase token on every request**. That refresh is why it runs even for public paths — server components can't write cookies, so this is the only place a renewed token can be handed back. Two traps encoded there: the response object must be the one Supabase wrote cookies into (rebuilding it drops the refresh), and the redirect for signed-out users has to copy those cookies across or the refresh is lost.
+- **`/signup` must stay in `PUBLIC_PREFIXES`** alongside `/login`, for the same reason as the landing page.
+- Sign-out is a server route (`POST /api/auth/signout`) so cookies are cleared by the response.
+
+### Google OAuth
+
+- The provider is configured **entirely in the Supabase dashboard** (Authentication → Providers → Google, client id + secret from Google Cloud Console). The app only names the provider — **there is no Google client id or secret anywhere in this repo, by design.** Don't "helpfully" add one.
+- `src/app/auth/callback/route.ts` exchanges the PKCE `code` for a session. It's a route handler rather than a page because route handlers can write cookies.
+- **`/auth/callback` must stay in `PUBLIC_PREFIXES`.** The visitor isn't signed in when they arrive — they're carrying an unexchanged code — so gating it bounces them to `/login` and discards the code. The failure looks like Google rejecting the user, not like a routing bug.
+- `next` is validated to be a same-origin path before redirecting, so the callback can't be used as an open redirect.
+- Supabase's message for a stale or reused code is a paragraph about PKCE storage and SSR frameworks. It's logged, not shown; the user sees "That sign-in link has expired or was already used." Verified for cancelled consent, provider errors, missing code and invalid code.
+- **Three URLs have to agree or the flow fails at the last step**: Google Cloud Console's authorized redirect URI is `https://<ref>.supabase.co/auth/v1/callback`; Supabase's *Redirect URLs* allowlist must contain `http://localhost:3000/auth/callback` and the production equivalent; anything not on that allowlist silently falls back to the Site URL, so sign-in appears to work but lands in the wrong place.
+- A Google user hits the same `ensureLocalUser` path as an email user, so the demo game is seeded for them too.
+
+**Observed in dev:** restarting the dev server reliably drops the browser's Supabase session. The likely cause is that the first request after a restart triggers a token refresh, and a failure there makes the SDK clear the auth cookies rather than retry. Harmless locally — sign in again — but worth remembering before chasing it as a bug, and worth watching if it ever shows up against a flaky network in production.
+
+**Migration note:** this replaced password-less name login outright, by explicit decision. Pre-existing rows (`Om`, `Local Player`) are still in the dev database with their games, but have no `supabaseUserId` and are therefore unreachable — nobody can sign in as them. They are not a bug; deleting them is safe whenever you want the database tidy.
+
+---

@@ -1,6 +1,5 @@
 import Link from "next/link";
 import type { AdminOverview } from "@/server/admin";
-import { AdminLockButton } from "./admin-lock-button";
 
 function formatWhen(date: Date): string {
   return date.toLocaleString(undefined, {
@@ -54,7 +53,6 @@ export function AdminOverviewView({ data }: { data: AdminOverview }) {
           >
             Explanation log
           </Link>
-          <AdminLockButton />
         </div>
       </div>
 
@@ -72,10 +70,11 @@ export function AdminOverviewView({ data }: { data: AdminOverview }) {
           <p className="text-sm text-stone-500">Nobody has signed up yet.</p>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full min-w-[36rem] text-sm">
+            <table className="w-full min-w-[42rem] text-sm">
               <thead className="bg-muted/60 text-left text-xs text-stone-500">
                 <tr>
                   <th className="px-4 py-2 font-medium">Name</th>
+                  <th className="px-4 py-2 font-medium">Email</th>
                   <th className="px-4 py-2 font-medium">Signed up</th>
                   <th className="px-4 py-2 text-right font-medium">Games</th>
                   <th className="px-4 py-2 text-right font-medium">Reflections</th>
@@ -86,6 +85,9 @@ export function AdminOverviewView({ data }: { data: AdminOverview }) {
                 {users.map((u) => (
                   <tr key={u.id} className="border-t border-border">
                     <td className="px-4 py-2 font-medium">{u.name}</td>
+                    <td className="px-4 py-2 font-mono text-[0.8rem] text-stone-500">
+                      {u.email ?? "—"}
+                    </td>
                     <td className="px-4 py-2 text-stone-500">{formatWhen(u.createdAt)}</td>
                     <td className="px-4 py-2 text-right font-mono">{u.gameCount}</td>
                     <td className="px-4 py-2 text-right font-mono">{u.reflectionCount}</td>

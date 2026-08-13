@@ -1,9 +1,8 @@
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { getCurrentUser } from "@/server/auth";
-import { adminEnabled, isAdminUnlocked } from "@/server/admin-auth";
+import { isAdminUser } from "@/server/admin-auth";
 import { getRecentExplanations } from "@/server/explain/monitor";
 import { ExplanationLogView } from "@/components/admin/explanation-log-view";
-import { AdminUnlock } from "@/components/admin/admin-unlock";
 
 export const dynamic = "force-dynamic";
 
@@ -20,12 +19,9 @@ export default async function AdminExplanationsPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login?next=/admin/explanations");
 
-  // Previously any signed-in user could read this. The entries contain other
-  // people's generated explanations, so it belongs behind the same admin key
-  // as the rest of /admin.
-  if (!(await isAdminUnlocked())) {
-    return <AdminUnlock configured={adminEnabled()} />;
-  }
+  // The entries contain other people's generated explanations, so this sits
+  // behind the same allowlist as the rest of /admin.
+  if (!isAdminUser(user)) notFound();
 
   const initialEntries = getRecentExplanations();
 

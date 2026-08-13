@@ -1,77 +1,42 @@
-import { createHash, timingSafeEqual } from "crypto";
-import { cookies } from "next/headers";
+import type { User } from "@prisma/client";
+import { normalizeEmail } from "@/lib/email";
 
 /**
- * Access control for the /admin area.
+ * Access control for the /admin area: an allowlist of email addresses.
  *
- * Why a secret key rather than "is this user an admin": login is
- * password-less — you become an account by typing its name. So any check of
- * the form `user.name === "Om"` is bypassed by typing "Om". A name is an
- * identifier here, not a credential, and cannot gate anything.
+ * This only became a safe design once email/password auth landed. Under the
+ * old password-less scheme an account was claimed by typing its name, so
+ * checking who someone was proved nothing and admin had to be gated by a
+ * shared secret instead. Now identity is backed by a password Supabase
+ * verifies, so "is this person an admin" is a question worth asking.
  *
- * So admin access needs something the visitor has to *know*: ADMIN_KEY, set
- * in the environment and never in the database. Unlocking sets an httpOnly
- * cookie holding a derived token — not the key itself, so a leaked cookie
- * can't be replayed as the key anywhere else.
- *
- * Fails closed: with ADMIN_KEY unset or too short, nobody is an admin. A
- * deployment that forgets to configure it gets a locked admin area, not an
- * open one.
+ * Fails closed: with ADMIN_EMAILS unset or empty, nobody is an admin —
+ * a misconfigured deploy gets a locked admin area, not an open one.
  */
 
-export const ADMIN_COOKIE = "rc_admin";
-
-/** Short keys are guessable; a missing key must not mean "open to all". */
-const MIN_KEY_LENGTH = 16;
-
-function sha256(value: string): Buffer {
-  return createHash("sha256").update(value).digest();
+/** Comma-separated, e.g. ADMIN_EMAILS="me@example.com,you@example.com". */
+export function adminEmails(): string[] {
+  const raw = process.env.ADMIN_EMAILS ?? "";
+  return raw
+    .split(",")
+    .map((e) => normalizeEmail(e))
+    .filter(Boolean);
 }
 
-function constantTimeEquals(a: string, b: string): boolean {
-  // Hash first so the comparison is over equal-length buffers — timingSafeEqual
-  // throws on a length mismatch, and the length itself would leak.
-  return timingSafeEqual(sha256(a), sha256(b));
-}
-
-function configuredKey(): string | null {
-  const key = process.env.ADMIN_KEY?.trim();
-  if (!key) return null;
-  if (key.length < MIN_KEY_LENGTH) {
-    console.error(
-      `[admin] ADMIN_KEY is shorter than ${MIN_KEY_LENGTH} characters — refusing to enable the admin area.`
-    );
-    return null;
-  }
-  return key;
-}
-
-/** True when an admin key is configured at all. */
+/** True when at least one admin email is configured. */
 export function adminEnabled(): boolean {
-  return configuredKey() !== null;
+  return adminEmails().length > 0;
 }
 
 /**
- * The value stored in the cookie. Derived from the key rather than being the
- * key, so reading the cookie doesn't hand over the credential itself.
+ * Whether this user may see the admin area.
+ *
+ * Compares against the email mirrored onto the local row at sign-in, which
+ * comes from Supabase — not from anything the user can set themselves.
  */
-export function adminCookieToken(): string | null {
-  const key = configuredKey();
-  return key === null ? null : sha256(`reflectchess-admin-v1:${key}`).toString("hex");
-}
-
-export function verifyAdminKey(submitted: string): boolean {
-  const key = configuredKey();
-  if (key === null) return false;
-  return constantTimeEquals(submitted, key);
-}
-
-/** Reads the request's cookies — for server components and route handlers. */
-export async function isAdminUnlocked(): Promise<boolean> {
-  const expected = adminCookieToken();
-  if (expected === null) return false;
-  const cookieStore = await cookies();
-  const presented = cookieStore.get(ADMIN_COOKIE)?.value;
-  if (!presented) return false;
-  return constantTimeEquals(presented, expected);
+export function isAdminUser(user: Pick<User, "email"> | null | undefined): boolean {
+  if (!user?.email) return false;
+  const allowed = adminEmails();
+  if (allowed.length === 0) return false;
+  return allowed.includes(normalizeEmail(user.email));
 }

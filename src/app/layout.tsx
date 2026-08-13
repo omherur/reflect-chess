@@ -1,12 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Inter, Newsreader, Geist_Mono } from "next/font/google";
+import { Button } from "@/components/ui/button";
 import { Toaster } from "@/components/ui/sonner";
 import { UserMenu } from "@/components/user-menu";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LogoMark } from "@/components/brand/logo";
 import { getCurrentUser } from "@/server/auth";
+import { isAdminUser } from "@/server/admin-auth";
 import "./globals.css";
 
 // Body text: a clean, neutral sans-serif.
@@ -68,18 +70,29 @@ export default async function RootLayout({
                     <Link href="/performance" className="hover:text-foreground">
                       Performance
                     </Link>
+                    {/* Only rendered for the allowlist — /admin 404s for
+                        everyone else, so advertising it would be noise. */}
+                    {isAdminUser(user) && (
+                      <Link href="/admin" className="hover:text-foreground">
+                        Admin
+                      </Link>
+                    )}
                   </nav>
                 )}
                 <ThemeToggle />
                 {user ? (
                   <UserMenu name={user.name} />
                 ) : (
-                  <Link
-                    href="/login"
-                    className="text-sm font-medium text-muted-foreground hover:text-foreground"
-                  >
-                    Log in
-                  </Link>
+                  <div className="flex items-center gap-2">
+                    <Link href="/login">
+                      <Button variant="ghost" size="sm">
+                        Sign in
+                      </Button>
+                    </Link>
+                    <Link href="/signup">
+                      <Button size="sm">Sign up</Button>
+                    </Link>
+                  </div>
                 )}
               </div>
             </div>

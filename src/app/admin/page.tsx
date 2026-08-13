@@ -1,26 +1,23 @@
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { getCurrentUser } from "@/server/auth";
-import { adminEnabled, isAdminUnlocked } from "@/server/admin-auth";
+import { isAdminUser } from "@/server/admin-auth";
 import { getAdminOverview } from "@/server/admin";
-import { AdminUnlock } from "@/components/admin/admin-unlock";
 import { AdminOverviewView } from "@/components/admin/admin-overview-view";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Signups and waitlist, for the person running this.
+ * Signups and waitlist, for whoever is on the ADMIN_EMAILS allowlist.
  *
- * The data is only fetched once the admin cookie checks out — a locked
- * visitor's response never contains a single name or email address, rather
- * than fetching and hiding them.
+ * A signed-in non-admin gets a 404 rather than "forbidden": there's no
+ * reason to confirm the page exists to someone who can't use it. The data
+ * is only queried after that check, so a rejected visitor's response never
+ * contains a name or an email address.
  */
 export default async function AdminPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login?next=/admin");
-
-  if (!(await isAdminUnlocked())) {
-    return <AdminUnlock configured={adminEnabled()} />;
-  }
+  if (!isAdminUser(user)) notFound();
 
   const data = await getAdminOverview();
   return <AdminOverviewView data={data} />;

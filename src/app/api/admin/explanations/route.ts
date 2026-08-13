@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/server/auth";
-import { isAdminUnlocked } from "@/server/admin-auth";
+import { isAdminUser } from "@/server/admin-auth";
 import { getRecentExplanations } from "@/server/explain/monitor";
 
 /**
@@ -9,12 +9,12 @@ import { getRecentExplanations } from "@/server/explain/monitor";
  * Gating the page without gating this route would be pointless — the page is
  * just a renderer, and the entries (other people's generated explanations)
  * would still be one fetch away for any signed-in user. Both go behind the
- * admin key.
+ * same email allowlist.
  */
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
-  if (!(await isAdminUnlocked())) {
+  if (!isAdminUser(user)) {
     return NextResponse.json({ error: "Admin access required." }, { status: 403 });
   }
 
