@@ -278,6 +278,16 @@ function findRelativePin(
           if (shielded.type === "k") continue;
           if (PIECE_VALUE[shielded.type] <= PIECE_VALUE[front.type]) continue;
 
+          // Exposing the shielded piece has to actually COST something.
+          // A pawn "pinning" a queen to a king is a pin; a queen lined up
+          // on a defended queen is a trade offer, and calling it a pin
+          // teaches the player to fear an even exchange. This was reported
+          // for real: "the d5 pawn can't move without losing the queen on
+          // d8" when d8 was defended by the king on e8, so Qxd8+ Kxd8 is
+          // simply queens off.
+          if (requireMaterial && !exposureCostsMaterial(chess, beyond, piece, defender, front.square)) {
+            continue;
+          }
           if (requireMaterial && !pinCostsMaterial(chess, front.square, attacker, defender)) {
             continue;
           }
@@ -287,6 +297,29 @@ function findRelativePin(
     }
   }
   return null;
+}
+
+/**
+ * Whether capturing the shielded piece would win material rather than
+ * merely trade. Undefended means it's simply won; otherwise the attacker
+ * has to be worth strictly less than what it takes, or the "threat" is an
+ * even exchange the player has no reason to avoid.
+ *
+ * The pinned piece in front is excluded from the defence count, since it's
+ * the piece that has to move for any of this to happen.
+ */
+function exposureCostsMaterial(
+  chess: Chess,
+  shieldedSquare: Square,
+  pinner: { type: PieceSymbol },
+  defender: Side,
+  pinnedSquare: Square
+): boolean {
+  const shielded = chess.get(shieldedSquare);
+  if (!shielded) return false;
+  const defenders = chess.attackers(shieldedSquare, defender).filter((sq) => sq !== pinnedSquare);
+  if (defenders.length === 0) return true;
+  return PIECE_VALUE[shielded.type] > PIECE_VALUE[pinner.type];
 }
 
 /**
@@ -454,6 +487,23 @@ const PIECE_NAME: Record<PieceSymbol, string> = {
   k: "king",
 };
 
+/**
+ * How to describe what the pin actually costs, which differs by shape and
+ * matters because the wrong phrasing states something false:
+ *
+ *  - against the king, the pinned piece genuinely cannot move at all;
+ *  - a pawn pinned along a FILE can still push — only its diagonal
+ *    captures leave the line — so "can't move" would be wrong;
+ *  - otherwise the piece may move and pay for it.
+ */
+function pinConsequence(chess: Chess, pin: { pinner: Square; pinned: Square; behind: Square }): string {
+  if (chess.get(pin.behind)?.type === "k") return "can't move without exposing";
+  const pinnedPiece = chess.get(pin.pinned);
+  const onSameFile = fileOf(pin.pinner) === fileOf(pin.pinned);
+  if (pinnedPiece?.type === "p" && onSameFile) return "can't capture away from the file without losing";
+  return "can't move without losing";
+}
+
 /** e.g. "White bishop" for the piece actually sitting on `square`. */
 function pieceLabel(chess: Chess, square: Square): string {
   const piece = chess.get(square);
@@ -518,12 +568,9 @@ export function findConcepts(
     const pinnedLabel = pieceLabel(chess, pin.pinned);
     const pinnerLabel = pieceLabel(chess, pin.pinner);
     const behindLabel = pieceLabel(chess, pin.behind);
-    // An absolute pin can't legally move at all; a relative one can, at a
-    // price. Saying "can't move" of the second would be plainly wrong.
-    const consequence = chess.get(pin.behind)?.type === "k" ? "can't move without exposing" : "can't move without losing";
     highlights.push({
       concept: "pin",
-      note: `${pinnedLabel} on ${pin.pinned} is pinned by the ${pinnerLabel} on ${pin.pinner} — it ${consequence} the ${behindLabel} on ${pin.behind}`,
+      note: `${pinnedLabel} on ${pin.pinned} is pinned by the ${pinnerLabel} on ${pin.pinner} — it ${pinConsequence(chess, pin)} the ${behindLabel} on ${pin.behind}`,
       squares: [pin.pinner, pin.behind, pin.pinned],
     });
   }
@@ -678,6 +725,19 @@ export type ExplanationField =
   | "summary.headline"
   | "summary.betterMove"
   | "summary.takeaway";
+
+/**
+ * Tactical terms in `text` that aren't in the verified vocabulary. Used for
+ * text that isn't a field of StructuredExplanation — the engine-line
+ * walkthrough notes, which are discarded wholesale rather than patched,
+ * since half an annotated line is worse than plain notation.
+ */
+export function findUngroundedTerms(text: string, allowed: string[]): string[] {
+  const allowedSet = new Set(allowed.map((c) => c.toLowerCase()));
+  return TACTICAL_TERMS.filter(
+    ({ concept, pattern }) => pattern.test(text) && !allowedSet.has(concept)
+  ).map(({ concept }) => concept);
+}
 
 export interface GroundingViolation {
   field: ExplanationField;

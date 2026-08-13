@@ -608,3 +608,32 @@ describe("applyGrounding", () => {
     expect(applyGrounding(primary, fallback, [])).toEqual(primary);
   });
 });
+
+describe("findConcepts — a pin must cost more than a trade", () => {
+  // Reported from a real reveal: "Black pawn on d5 is pinned by the White
+  // queen on d1 — it can't move without losing the Black queen on d8". The
+  // black queen is defended by its own king, and the pinner is also a
+  // queen, so Qxd8+ Kxd8 is queens coming off, not a loss. Calling that a
+  // pin teaches a player to fear an even exchange.
+  const TRADE_ONLY = "r1bqkb1r/ppp2ppp/2n5/1N1pP3/8/8/PPP2PPP/R1BQKB1R w KQkq - 0 1";
+
+  it("does not report a pin when exposing the shielded piece is only a trade", () => {
+    const pin = findConcepts(TRADE_ONLY, "b").find((h) => h.concept === "pin");
+    expect(pin).toBeUndefined();
+  });
+
+  it("still reports it when the shielded piece would actually be won", () => {
+    // Same shape with a ROOK doing the pinning instead of a queen: the
+    // shielded queen is worth more than the piece that would take it, so
+    // exposing it is a real loss rather than an exchange.
+    const fen = "3q1rk1/8/8/3p4/8/8/8/3RK3 w - - 0 1";
+    const pin = findConcepts(fen, "b").find((h) => h.concept === "pin");
+    expect(pin).toBeDefined();
+  });
+
+  it("does not claim a file-pinned pawn cannot move — it can still push", () => {
+    const fen = "3q1rk1/8/8/3p4/8/8/8/3RK3 w - - 0 1";
+    const pin = findConcepts(fen, "b").find((h) => h.concept === "pin");
+    expect(pin?.note).toContain("can't capture away from the file");
+  });
+});
