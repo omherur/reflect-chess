@@ -41,7 +41,7 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **next-themes** for dark mode (wired to a `ThemeProvider` + header toggle button).
-- **Vitest** for tests (332 tests / 21 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
+- **Vitest** for tests (340 tests / 22 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
 
 ---
 
@@ -115,7 +115,7 @@ Two SVG gotchas this cost time on, worth not rediscovering: a `*/` inside a bloc
 | Navbar auth state | **Working** | Signed out shows **Sign in** (ghost) + **Sign up** (primary); signed in shows the display name and a **Sign out** button. Display name is derived from the email's local part at first sign-in and is cosmetic only |
 | **IDOR fix** | **Fixed & verified** | All game-scoped routes (`/api/games/[id]`, `.../analyze`, `.../reflect`, `.../hint`) now check `game.userId === user.id`; previously did not |
 | Key-moment detection/selection | **Working, recently overhauled** | Now uses **win-probability** (`winProbLoss` in `src/lib/chess/eval.ts`, Lichess-style logistic curve), not raw centipawn delta, as the significance metric. Verified live: some games now correctly surface fewer key moments than the old minimum guarantee would have padded to |
-| Concept detection (pin/fork/skewer/hanging piece/back-rank/king exposure) | **Working, hardened, now materiality-gated** | Each detector verified against real chess rules (color, line-of-sight, alignment) with true-positive + false-positive-trap coverage. A real bug (mixed-color "pin" through a blocking pawn) was found and fixed with a permanent regression test. **Being geometrically real is no longer sufficient** — see §10: a tactic whose targets are adequately defended wins nothing and is now dropped, via a static exchange evaluation in `src/server/explain/exchange.ts` |
+| Concept detection (pin/fork/skewer/hanging piece/back-rank/king exposure) | **Working, hardened, materiality-gated, relative pins added** | Each detector verified against real chess rules (color, line-of-sight, alignment) with true-positive + false-positive-trap coverage. A real bug (mixed-color "pin" through a blocking pawn) was found and fixed with a permanent regression test. **Being geometrically real is no longer sufficient** — see §10: a tactic whose targets are adequately defended wins nothing and is now dropped, via a static exchange evaluation in `src/server/explain/exchange.ts` |
 | Concept **relevance filtering** | **Working** | `filterRelevantConcepts` in `src/server/explain/concepts.ts` — a concept only survives if spatially connected to the move played, the best move, or the immediate PV. Fixes concepts like back-rank weakness being mentioned when irrelevant to the specific move |
 | Reflection capture (reasoning + replay move) | **Working** | Two-question core mechanic, gate-verified repeatedly |
 | Reflection capture — confidence/tags/follow-up/voice | **Working, recently added** | 1-5 confidence (required), 6 optional tags, adaptive one-shot follow-up for thin answers, Web Speech API voice input (graceful no-op on unsupported browsers via `useSyncExternalStore`, not a hydration-unsafe effect). The "settle on this move over other options" follow-up question is skipped when the replay move equals the original — nothing to explain there |
@@ -259,6 +259,26 @@ A tactic can be geometrically real and worth nothing. The dev database had **38 
 Measured over the whole dev DB, apples-to-apples through the same relevance filter: skewer 38 → 0, hanging 30 → 28, pin 8 → 7, fork 3 → 2, back-rank and king exposure unchanged (no material gate applies to them). Moments carrying at least one finding: 70 → 45. The detector is not dead — scanning all 6,462 stored positions still finds 10 skewers, all genuine piece-behind-piece shapes.
 
 **If you loosen a gate, re-run that audit before believing the result.** The first version of the skewer gate counted the front piece as a defender of the piece behind it, which silently suppressed the single most common real skewer there is (a queen in front of a rook — the queen "defends" it right up until it has to run). Only the existing true-positive test caught it.
+
+### Truth and usefulness are different questions
+
+Found by looking at a real reveal: three of the four explanation cards had been replaced with generic template text, and the cause was the grounding check, not the model.
+
+The check asks "did a detector verify this term". It was being handed the **displayed** concept list — the one `filterRelevantConcepts` has already narrowed for usefulness — so anything true but not shown counted as invented. On the moment in question (`Bg5` in `r1bqk2r/pppp1ppp/1bn2n2/4p3/2BPP3/2P2N2/PP3PPP/RNBQK2R w KQkq - 1 6`) the stored list was empty, so *every* tactical word the model wrote was a violation.
+
+Three separate causes, all now fixed:
+
+1. **The allow-list came from the display set.** `verifiedConceptVocabulary()` now builds it from the board instead: unfiltered concepts on the position after the move, plus those along the principal variation the prompt asks the model to narrate. `findConcepts` takes `{ requireMaterial: false }` for this — displaying a finding asks "is this worth attention", grounding asks only "is this true", and one list can't answer both.
+2. **The detectors only ever saw one side.** They read threats belonging to the side to move, which after the player's move means threats *against* the player. `Bg5` pinning a knight is the player's own pin, so it was structurally invisible — the player literally wrote "pinning the knight to the queen" and the system could not confirm it. The vocabulary now also runs detection with the side to move flipped (a null move). **The displayed list is still deliberately one-sided**; only the allow-list sees both.
+3. **Relative pins weren't detected at all** — only pins against the king. A knight pinned to a queen is one of the commonest shapes in chess. `findRelativePin` covers it; the note says "can't move without losing" rather than "exposing", since a relative pin costs material rather than being illegal.
+
+Also fixed: the pin pattern in `TACTICAL_TERMS` matched "pin/pinned/pinning" but not **"pins"**, so the same claim was checked or waved through depending on verb form.
+
+After all four, that reveal regenerates with every field model-written and specific — "The pawn on e5 was only defended by the knight on f6, and Bg5 does nothing to challenge that" in place of "It missed a stronger continuation the engine found in this position."
+
+Displayed concepts across the dev DB, versus the original numbers above: pin 9 → 24 (relative pins are common and real), skewer 38 → 0, moments carrying a finding 71 → 54.
+
+**The guarantee is unchanged in kind and weaker in degree.** Every term is still one a deterministic detector verified on a real position; none is a model assertion. But a tactic verified several plies into the engine's line can now be cited as though it were on the board today, which is why the PV window is short.
 
 ### The verdict is read in two layers
 
