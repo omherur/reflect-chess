@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { Chess } from "chess.js";
 import {
   findConcepts,
   computeApproximate,
@@ -42,6 +43,24 @@ describe("findConcepts — fork", () => {
     const highlights = findConcepts(fen, "b");
     expect(highlights.find((h) => h.concept === "fork")).toBeUndefined();
   });
+
+  it("does not report a fork whose targets are all defended by an equal piece — it wins nothing", () => {
+    // White knight d5 hits the black knights on c7 and e7, and each is
+    // defended by the bishop on d8. Nxc7 Bxc7 is knight for knight: real
+    // geometry, no material, nothing the player needs told.
+    const fen = "k2b4/2n1n3/8/3N4/8/8/8/7K w - - 0 1";
+    const highlights = findConcepts(fen, "b");
+    expect(highlights.find((h) => h.concept === "fork")).toBeUndefined();
+  });
+
+  it("still reports a fork on defended targets when the trade wins material", () => {
+    // Same shape with rooks instead of knights: Nxc7 Bxc7 wins a rook for a
+    // knight, so being defended doesn't make this one negligible. The point
+    // of the gate is material, not "is anything covering it".
+    const fen = "k2b4/2r1r3/8/3N4/8/8/8/7K w - - 0 1";
+    const highlights = findConcepts(fen, "b");
+    expect(highlights.find((h) => h.concept === "fork")).toBeDefined();
+  });
 });
 
 describe("findConcepts — pin", () => {
@@ -79,6 +98,26 @@ describe("findConcepts — pin", () => {
     const highlights = findConcepts(fen, "b");
     expect(highlights.find((h) => h.concept === "pin")).toBeUndefined();
   });
+
+  it("does not report a pin on a piece defended more times than it is attacked", () => {
+    // The knight on e5 really is pinned to the king on e8 by the rook on e1,
+    // but the d6 and f6 pawns both cover it against a single attacker. It
+    // can't move, and it also can't be won — so it costs nothing, and
+    // reporting it as a finding is exactly the kind of true-but-useless
+    // fact that crowds out the one thing that mattered.
+    const fen = "4k3/8/3p1p2/4n3/8/8/8/4RK2 w - - 0 1";
+    const highlights = findConcepts(fen, "b");
+    expect(highlights.find((h) => h.concept === "pin")).toBeUndefined();
+  });
+
+  it("still reports a pin when the attackers at least match the defenders", () => {
+    // One defender instead of two. A pinned piece can never run, so the
+    // attacker only has to match the defence to win it by piling on — which
+    // makes this pin genuinely load-bearing.
+    const fen = "4k3/8/3p4/4n3/8/8/8/4RK2 w - - 0 1";
+    const highlights = findConcepts(fen, "b");
+    expect(highlights.find((h) => h.concept === "pin")).toBeDefined();
+  });
 });
 
 describe("findConcepts — skewer", () => {
@@ -111,6 +150,69 @@ describe("findConcepts — skewer", () => {
     const highlights = findConcepts(fen, "b");
     expect(highlights.find((h) => h.concept === "pin")).toBeDefined();
     expect(highlights.find((h) => h.concept === "skewer")).toBeUndefined();
+  });
+
+  it("does not report a skewer when the piece behind is defended and no more valuable than the attacker", () => {
+    // Rook a1, black queen e1 in front, black rook h1 behind — the same
+    // shape as the positive case above, except the bishop on g2 now covers
+    // h1. Rxh1 Bxh1 is rook for rook, so the skewer wins nothing.
+    const fen = "1k4K1/8/8/8/8/8/6b1/R3q2r w - - 0 1";
+    const highlights = findConcepts(fen, "b");
+    expect(highlights.find((h) => h.concept === "skewer")).toBeUndefined();
+  });
+});
+
+describe("findConcepts — negligible tactics found in real games", () => {
+  // These four positions are lifted from the development database, where
+  // every one of them was being reported to a player as a "skewer". They
+  // are the concrete reason the materiality gates exist: all four are
+  // geometrically real and none of them wins anything.
+  const cases: { name: string; fen: string; move: string }[] = [
+    {
+      name: "a queen 'skewering' two pawns down the d-file",
+      fen: "rnbqkbnr/pppp1ppp/8/8/3pP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 1 3",
+      move: "d5",
+    },
+    {
+      name: "a queen 'forcing' a defended pawn to move and expose another pawn",
+      fen: "r2r2k1/pbq1bp2/5n2/2pp2pQ/8/2N1P3/PPB2PPP/3RR1K1 b - - 1 18",
+      move: "Kg7",
+    },
+    {
+      name: "a bishop 'skewering' a defended knight onto a defended bishop",
+      fen: "r2q1rk1/pb1nbpp1/1p2pn1p/2pp4/2PP3B/2NBPN2/PP2QPPP/3R1RK1 b - - 1 11",
+      move: "Qc7",
+    },
+    {
+      name: "a queen 'skewering' a defended knight onto a defended bishop",
+      fen: "r2r4/pbq1bpk1/5n2/2pp2Q1/8/2N1P3/PPB2PPP/3RR1K1 b - - 0 19",
+      move: "Kh8",
+    },
+  ];
+
+  for (const { name, fen, move } of cases) {
+    it(`no longer reports ${name}`, () => {
+      const chess = new Chess(fen);
+      const played = chess.move(move);
+      const highlights = findConcepts(chess.fen(), played.color);
+      expect(highlights.find((h) => h.concept === "skewer")).toBeUndefined();
+    });
+  }
+});
+
+describe("findConcepts — legality of the threat", () => {
+  it("does not report a hanging piece when the only attacker is pinned and cannot legally take it", () => {
+    // The white rook on a4 geometrically attacks the undefended black knight
+    // on e4, but it is pinned to its own king on a1 by the rook on a8, so
+    // Rxe4 is not a legal move and the knight was never in danger. An
+    // attacker count says "free piece"; enumerating legal captures doesn't.
+    const fen = "r6k/8/8/8/R3n3/8/8/K7 w - - 0 1";
+    const highlights = findConcepts(fen, "b");
+    const hanging = highlights.find((h) => h.concept === "hanging piece");
+    // The rook on a8 IS hanging — Rxa8 stays on the pin line, so it's legal
+    // and free. The knight on e4 is the piece this is about: it must not be
+    // named, because the only move that could take it doesn't exist.
+    expect(hanging?.squares ?? []).not.toContain("e4");
   });
 });
 
@@ -292,6 +394,24 @@ describe("findGroundingViolations", () => {
     const clean = explanation();
     expect(findGroundingViolations(clean, [], [])).toEqual([]);
   });
+
+  it("checks the summary layer too — it is the part most players actually read", () => {
+    const bad = explanation({
+      summary: {
+        headline: "You walked into a fork on e5.",
+        betterMove: "Nc2 keeps everything covered.",
+        takeaway: "Check for undefended pieces.",
+      },
+    });
+    expect(findGroundingViolations(bad, [], [])).toEqual([
+      { field: "summary.headline", concept: "fork" },
+    ]);
+    expect(findGroundingViolations(bad, ["fork"], [])).toEqual([]);
+  });
+
+  it("does not fail on an explanation stored before the summary layer existed", () => {
+    expect(findGroundingViolations(explanation({ summary: undefined }), [], [])).toEqual([]);
+  });
 });
 
 describe("applyGrounding", () => {
@@ -310,6 +430,76 @@ describe("applyGrounding", () => {
     expect(patched.whatItMissed).toBe("Fallback: it missed a stronger continuation.");
     expect(patched.remember).toBe("This is a clean, concept-free sentence.");
     expect(patched.whatYourMoveDid).toBe(primary.whatYourMoveDid);
+  });
+
+  it("patches a summary line from the model's own surviving prose, not the generic template", () => {
+    // The headline named an unverified tactic, but whatItMissed — which
+    // says the same thing at length — passed the check. Its first sentence
+    // is verified by exactly the same test and is far more concrete than
+    // the template's stock line, so it wins.
+    const primary = explanation({
+      whatItMissed: "The knight on e5 has nothing covering it. Bxe5 takes it for free.",
+      summary: {
+        headline: "You walked into a fork on e5.",
+        betterMove: "Nc2 keeps everything covered.",
+        takeaway: "Check for undefended pieces.",
+      },
+    });
+    const fallback = explanation({
+      summary: {
+        headline: "Nd4 gave up a small amount of your advantage.",
+        betterMove: "Fallback better move.",
+        takeaway: "Fallback takeaway.",
+      },
+    });
+    const patched = applyGrounding(primary, fallback, findGroundingViolations(primary, [], []));
+    expect(patched.summary?.headline).toBe("The knight on e5 has nothing covering it.");
+  });
+
+  it("falls back to the template summary when the deep field is ungrounded too", () => {
+    // Both the headline and the field it would borrow from name the same
+    // unverified tactic, so there is no verified prose left to promote.
+    const primary = explanation({
+      whatItMissed: "You missed the fork on e5.",
+      summary: {
+        headline: "You walked into a fork on e5.",
+        betterMove: "Nc2 keeps everything covered.",
+        takeaway: "Check for undefended pieces.",
+      },
+    });
+    const fallback = explanation({
+      summary: {
+        headline: "Fallback headline.",
+        betterMove: "Fallback better move.",
+        takeaway: "Fallback takeaway.",
+      },
+    });
+    const patched = applyGrounding(primary, fallback, findGroundingViolations(primary, [], []));
+    expect(patched.summary?.headline).toBe("Fallback headline.");
+  });
+
+  it("patches one summary line without disturbing the other two", () => {
+    const primary = explanation({
+      summary: {
+        headline: "You walked into a fork on e5.",
+        betterMove: "Nc2 keeps everything covered.",
+        takeaway: "Check for undefended pieces.",
+      },
+    });
+    const fallback = explanation({
+      summary: {
+        headline: "Fallback headline with no tactic named.",
+        betterMove: "Fallback better move.",
+        takeaway: "Fallback takeaway.",
+      },
+    });
+    const patched = applyGrounding(primary, fallback, findGroundingViolations(primary, [], []));
+
+    // Only the headline named an unverified tactic, so only the headline
+    // moves — here to the clean whatItMissed, per the preference above.
+    expect(patched.summary?.headline).toBe("A stronger continuation was available.");
+    expect(patched.summary?.betterMove).toBe("Nc2 keeps everything covered.");
+    expect(patched.summary?.takeaway).toBe("Check for undefended pieces.");
   });
 
   it("is a no-op when there are no violations", () => {
