@@ -13,7 +13,10 @@ import type { Color, KeyMomentPublic, KeyMomentVerdict } from "@/lib/types";
 import { REFLECTION_TAGS } from "@/lib/reflection-tags";
 import { ReviewBoard } from "./review-board";
 import { RevealPanel } from "./reveal-panel";
+import { RevealProgress } from "./reveal-progress";
 import { VoiceInputButton } from "./voice-input-button";
+import { readRevealStream } from "@/lib/reveal-stream";
+import type { RevealStage } from "@/lib/reveal-progress";
 import { MessageCircle, Undo2, Lightbulb, HelpCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -54,6 +57,7 @@ interface ReplaySelection {
   fenAfter: string;
 }
 
+
 function applyUci(fen: string, uci: string): string {
   const chess = new Chess(fen);
   chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.slice(4, 5) || undefined });
@@ -76,6 +80,7 @@ function ReflectionForm({
   const [replayText, setReplayText] = useState("");
   const [boardMove, setBoardMove] = useState<ReplaySelection | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [stage, setStage] = useState<RevealStage>("checking");
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [hintLoading, setHintLoading] = useState(false);
@@ -152,6 +157,7 @@ function ReflectionForm({
   async function submit() {
     if (!canSubmit || !effectiveReplay) return;
     setSubmitting(true);
+    setStage("checking");
     setError(null);
     try {
       const res = await fetch(`/api/games/${gameId}/keymoments/${keyMoment.id}/reflect`, {
@@ -167,12 +173,18 @@ function ReflectionForm({
           followUpAnswer: followUpAnswer.trim() || undefined,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Could not submit your reflection.");
-      onReviewed(data.keyMoment as KeyMomentVerdict);
+      // Anything the server could reject up front (a missing field, an
+      // illegal move, a moment already reviewed) still comes back as a
+      // normal JSON error with a status code.
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error ?? "Could not submit your reflection.");
+      }
+      const verdict = await readRevealStream(res, setStage);
+      setStage("done");
+      onReviewed(verdict);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not submit your reflection.");
-    } finally {
       setSubmitting(false);
     }
   }
@@ -411,21 +423,26 @@ function ReflectionForm({
         </Alert>
       )}
 
-      <div className="flex justify-end">
-        <Button
-          size="lg"
-          onClick={handleSubmitClick}
-          disabled={!canSubmit || submitting || checkingFollowUp}
-        >
-          {submitting
-            ? "Revealing…"
-            : checkingFollowUp
+      {/* Once submitted, the button gives way to the progress panel — the
+          work behind it takes long enough that a static "Revealing…" label
+          reads as a hung page. */}
+      {submitting ? (
+        <RevealProgress stage={stage} />
+      ) : (
+        <div className="flex justify-end">
+          <Button
+            size="lg"
+            onClick={handleSubmitClick}
+            disabled={!canSubmit || checkingFollowUp}
+          >
+            {checkingFollowUp
               ? "One moment…"
               : followUpQuestion
                 ? "Continue"
                 : "Submit and reveal engine verdict"}
-        </Button>
-      </div>
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
