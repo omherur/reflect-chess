@@ -41,7 +41,7 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **next-themes** for dark mode (wired to a `ThemeProvider` + header toggle button).
-- **Vitest** for tests (340 tests / 22 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
+- **Vitest** for tests (359 tests / 22 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
 
 ---
 
@@ -288,6 +288,22 @@ Displayed concepts across the dev DB, versus the original numbers above: pin 9 �
 - The Claude provider **requires** the summary and throws without it, so a missing one takes the logged fallback path and shows up on `/admin/explanations` rather than being silently patched over. The prompt gained a two-layers section (with per-line word limits, and a ban on eval numbers in the summary) and a "cut whatever isn't load-bearing" section; all three worked examples now include a summary.
 - The grounding check covers the summary too, addressed as `summary.headline` etc. When a summary line has to be replaced, `applyGrounding` **prefers the model's own surviving deep field** (headline ← `whatItMissed`, betterMove ← `whyBestIsBetter`, takeaway ← `remember`) over the template's generic line — that text passed the identical check, and the summary is the layer everyone reads. Verified live: a patched headline went from "Qc7 gave up a small amount of your advantage" to "Qc7 develops safely, but it skips the chance to trade off White's active knight on c3 with tempo."
 - Splitting the layers costs nothing at runtime: the deep fields were always generated in the same call and are already on the client. Nobody is shown a shallower analysis, only a differently ordered one.
+
+### Making the analysis readable at a glance
+
+Three problems found by looking at a second rendered reveal, all about a player being able to trust and follow what they're reading.
+
+**Was my move wrong, or did I miss something better?** That's the first question anyone has, and the panel left it implicit — a "Good move" badge sat above "your winning chances dropped by 11 percentage points" and four cards headed "What it missed", which reads as a contradiction until you've read all of it. `moveFraming()` in `src/lib/format.ts` now states it in one line above everything else. It's a plain map from the classification the engine already assigned, deliberately not generated prose, so it can never disagree with the badge beside it.
+
+**The engine's line was unreadable.** `Nd7 Qxd5 a6 Nc3 c6` looks like handing over a pawn for nothing; the point is that c6 then hits the queen. `lineWalkthrough` annotates the line a move at a time, in the FIRST layer next to the board, because "why would I allow that?" is a question people have while looking at the position.
+
+- Every step's move is checked verbatim against the engine's own line, in order from the start. Any mismatch **discards the whole walkthrough** rather than patching it — a partly-invented line presented as the engine's recommendation is far worse than plain notation.
+- The cap is six moves, not four. The move that pays for a concession is often the fifth, and cutting at four shows a player a sacrifice and stops right before the justification.
+- **The prompt's own example originally skipped a move**, teaching precisely the behaviour the validator rejects. If you edit that example, keep it gapless.
+
+**The model was guessing at deep lines.** It annotated c6 as "shores up the center, ignoring the queen for now" when c6 attacks the White queen. `src/server/explain/pv-facts.ts` plays the line out and hands the model verified facts per move — what it captures, whether it checks, what it now attacks, whether it lands undefended. Same class of fact as the concept detectors: computed, never asserted. With those, c6 came back as "hits the queen on d5, forcing it to move again."
+
+Also fixed, and worth understanding before touching `findRelativePin`: it reported *"the d5 pawn can't move without losing the Black queen on d8"* when d8 was defended by the king on e8 and the pinner was also a queen — Qxd8+ Kxd8 is queens coming off, not a loss. A relative pin now requires that exposing the shielded piece actually **wins material** rather than trading (`exposureCostsMaterial`), and the wording distinguishes three cases, because "can't move" is false for two of them: pinned against the king (genuinely immobile), a pawn pinned along a file (can still push — only diagonal captures leave the line), and everything else (can move, and pays).
 
 ### The wait is now legible
 
