@@ -5,13 +5,15 @@ import { prisma } from "@/lib/db";
  * the waitlist. Both lists are newest-first, since "what happened recently"
  * is the question this page exists to answer.
  *
- * Callers must check isAdminUnlocked() first — nothing in here does its own
+ * Callers must check isAdminUser() first — nothing in here does its own
  * access control.
  */
 
 export interface AdminUserRow {
   id: string;
   name: string;
+  /** Null for rows predating Supabase auth, which nobody can sign in as. */
+  email: string | null;
   createdAt: Date;
   gameCount: number;
   /** Key moments this user has actually reflected on — the engagement signal. */
@@ -72,6 +74,7 @@ export async function getAdminOverview(): Promise<AdminOverview> {
     users: users.map((u) => ({
       id: u.id,
       name: u.name,
+      email: u.email,
       createdAt: u.createdAt,
       gameCount: u._count.games,
       reflectionCount: reflectionsByUser.get(u.id) ?? 0,

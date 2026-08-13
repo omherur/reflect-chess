@@ -1,84 +1,86 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { adminCookieToken, adminEnabled, verifyAdminKey } from "./admin-auth";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { adminEmails, adminEnabled, isAdminUser } from "./admin-auth";
 
 /**
- * The admin gate is the only thing standing between a signed-in stranger and
- * every user's name and email address, and login is password-less — so these
- * cases are the whole security model, not edge cases.
+ * The allowlist is the only thing standing between a signed-in stranger and
+ * every user's name and email address, so these cases are the whole security
+ * model rather than edge cases.
+ *
+ * The email compared here is the one Supabase authenticated and mirrored onto
+ * the local row — not anything the user can type — which is what makes an
+ * identity check meaningful now that login has a password behind it.
  */
 
-const VALID_KEY = "a-sufficiently-long-admin-key";
-const original = process.env.ADMIN_KEY;
+const ADMIN = "om.herur@gmail.com";
+const original = process.env.ADMIN_EMAILS;
 
-beforeEach(() => {
-  vi.spyOn(console, "error").mockImplementation(() => {});
-});
+const user = (email: string | null) => ({ email });
 
 afterEach(() => {
-  process.env.ADMIN_KEY = original;
-  vi.restoreAllMocks();
+  if (original === undefined) delete process.env.ADMIN_EMAILS;
+  else process.env.ADMIN_EMAILS = original;
 });
 
-describe("when ADMIN_KEY is not configured", () => {
+describe("when ADMIN_EMAILS is not configured", () => {
   it("fails closed — nobody is an admin", () => {
-    delete process.env.ADMIN_KEY;
+    delete process.env.ADMIN_EMAILS;
     expect(adminEnabled()).toBe(false);
-    expect(adminCookieToken()).toBeNull();
-    expect(verifyAdminKey("")).toBe(false);
-    expect(verifyAdminKey("anything")).toBe(false);
+    expect(isAdminUser(user(ADMIN))).toBe(false);
+    expect(isAdminUser(user("anyone@example.com"))).toBe(false);
   });
 
-  it("treats an empty or whitespace-only key as unset", () => {
-    process.env.ADMIN_KEY = "   ";
+  it("treats an empty or comma-only value as unset", () => {
+    process.env.ADMIN_EMAILS = " , , ";
     expect(adminEnabled()).toBe(false);
-    expect(verifyAdminKey("   ")).toBe(false);
-  });
-
-  it("refuses a key short enough to guess", () => {
-    process.env.ADMIN_KEY = "short";
-    expect(adminEnabled()).toBe(false);
-    // Critically, submitting the correct-but-too-short key still fails.
-    expect(verifyAdminKey("short")).toBe(false);
+    expect(isAdminUser(user(ADMIN))).toBe(false);
   });
 });
 
-describe("when ADMIN_KEY is configured", () => {
+describe("with a single admin email configured", () => {
   beforeEach(() => {
-    process.env.ADMIN_KEY = VALID_KEY;
+    process.env.ADMIN_EMAILS = ADMIN;
   });
 
-  it("accepts the exact key", () => {
+  it("admits exactly that address", () => {
     expect(adminEnabled()).toBe(true);
-    expect(verifyAdminKey(VALID_KEY)).toBe(true);
+    expect(isAdminUser(user(ADMIN))).toBe(true);
   });
 
   it.each([
-    ["wrong key", "not-the-admin-key-at-all"],
-    ["empty", ""],
-    ["a prefix of the key", VALID_KEY.slice(0, -1)],
-    ["the key plus a character", `${VALID_KEY}x`],
-    ["different case", VALID_KEY.toUpperCase()],
-    ["surrounding whitespace", ` ${VALID_KEY} `],
-  ])("rejects %s", (_label, submitted) => {
-    expect(verifyAdminKey(submitted)).toBe(false);
+    ["a different address", "someone.else@gmail.com"],
+    ["same local part, different domain", "om.herur@example.com"],
+    ["same domain, different local part", "not.om@gmail.com"],
+    ["a superstring", `x${ADMIN}`],
+    ["a substring", "om.herur@gmail.co"],
+    ["gmail dot-trick variant", "omherur@gmail.com"],
+    ["plus-addressed variant", "om.herur+admin@gmail.com"],
+  ])("rejects %s", (_label, email) => {
+    expect(isAdminUser(user(email))).toBe(false);
   });
 
-  it("derives a cookie token that is not the key itself", () => {
-    const token = adminCookieToken();
-    expect(token).toBeTruthy();
-    expect(token).not.toBe(VALID_KEY);
-    expect(token).not.toContain(VALID_KEY);
-    // A leaked cookie must not be usable as the key.
-    expect(verifyAdminKey(token!)).toBe(false);
+  it("ignores casing and surrounding whitespace, as sign-in would", () => {
+    expect(isAdminUser(user("  OM.Herur@Gmail.COM  "))).toBe(true);
   });
 
-  it("derives the same token every time, so a cookie survives a restart", () => {
-    expect(adminCookieToken()).toBe(adminCookieToken());
+  it("rejects a user with no email and a missing user", () => {
+    expect(isAdminUser(user(null))).toBe(false);
+    expect(isAdminUser(null)).toBe(false);
+    expect(isAdminUser(undefined)).toBe(false);
+  });
+});
+
+describe("with several admin emails configured", () => {
+  beforeEach(() => {
+    process.env.ADMIN_EMAILS = ` ${ADMIN} , Second.Admin@Example.com `;
   });
 
-  it("derives a different token for a different key", () => {
-    const first = adminCookieToken();
-    process.env.ADMIN_KEY = "a-completely-different-admin-key";
-    expect(adminCookieToken()).not.toBe(first);
+  it("parses and normalizes the whole list", () => {
+    expect(adminEmails()).toEqual([ADMIN, "second.admin@example.com"]);
+  });
+
+  it("admits every listed address and nobody else", () => {
+    expect(isAdminUser(user(ADMIN))).toBe(true);
+    expect(isAdminUser(user("second.admin@example.com"))).toBe(true);
+    expect(isAdminUser(user("third@example.com"))).toBe(false);
   });
 });
