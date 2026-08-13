@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { TemplateExplanationProvider } from "./generate";
 import { FallbackExplanationProvider } from "./fallback-provider";
-import { buildUserPrompt, parseResponse, SYSTEM_PROMPT } from "./claude-provider";
+import { buildUserPrompt, parseResponse, SYSTEM_PROMPT, validateWalkthrough } from "./claude-provider";
 import type { ExplainInput, ExplanationProvider } from "./types";
 import type { ConceptHighlight, StructuredExplanation } from "@/lib/types";
 
@@ -500,5 +500,73 @@ describe("Claude provider prompt + response parsing", () => {
 
   it("throws on malformed JSON so the caller can fall back", () => {
     expect(() => parseResponse("not json at all")).toThrow();
+  });
+});
+
+describe("validateWalkthrough", () => {
+  const PV = ["Nd7", "Qxd5", "a6", "Nc3", "c6", "Qd3"];
+  const steps = (moves: string[]) => moves.map((move) => ({ move, note: "does something useful" }));
+
+  it("accepts steps that match the engine's line from its first move", () => {
+    expect(validateWalkthrough(steps(["Nd7", "Qxd5", "a6"]), PV)).toEqual([
+      { move: "Nd7", note: "does something useful" },
+      { move: "Qxd5", note: "does something useful" },
+      { move: "a6", note: "does something useful" },
+    ]);
+  });
+
+  it("discards the whole walkthrough when a move isn't the engine's", () => {
+    // The failure this guards against is the worst one available here:
+    // an annotated line that reads as the engine's recommendation while
+    // containing a move the engine never gave. Half-trustworthy is worse
+    // than plain notation, so nothing is shown at all.
+    expect(validateWalkthrough(steps(["Nd7", "Qxd4", "a6"]), PV)).toBeUndefined();
+  });
+
+  it("discards it when moves are skipped or reordered", () => {
+    expect(validateWalkthrough(steps(["Nd7", "a6"]), PV)).toBeUndefined();
+    expect(validateWalkthrough(steps(["Qxd5", "Nd7"]), PV)).toBeUndefined();
+  });
+
+  it("caps the number of steps so the line stays glanceable", () => {
+    const longPv = [...PV, "Nxe5", "Qxd8+"];
+    expect(validateWalkthrough(steps(longPv), longPv)).toHaveLength(6);
+  });
+
+  it("goes far enough to include the move that pays for a concession", () => {
+    // The whole point of this line is c6, the fifth move, which hits the
+    // queen and the knight together. A cap that stopped at four would show
+    // the player a pawn being given away and never explain why.
+    const walked = validateWalkthrough(steps(PV), PV);
+    expect(walked?.map((s) => s.move)).toContain("c6");
+  });
+
+  it("rejects malformed or empty entries rather than rendering blanks", () => {
+    expect(validateWalkthrough([{ move: "Nd7", note: "  " }, { move: "Qxd5", note: "x" }], PV)).toBeUndefined();
+    expect(validateWalkthrough([{ move: "Nd7" }, { move: "Qxd5" }], PV)).toBeUndefined();
+    expect(validateWalkthrough("Nd7 Qxd5", PV)).toBeUndefined();
+    expect(validateWalkthrough([], PV)).toBeUndefined();
+  });
+
+  it("needs at least two moves to be worth showing", () => {
+    expect(validateWalkthrough(steps(["Nd7"]), PV)).toBeUndefined();
+  });
+
+  it("is absent when the engine gave no line at all", () => {
+    expect(validateWalkthrough(steps(["Nd7", "Qxd5"]), [])).toBeUndefined();
+  });
+});
+
+describe("Claude system prompt — clarity rules", () => {
+  it("requires the engine's line to be walked move by move", () => {
+    expect(SYSTEM_PROMPT).toMatch(/WALK THE ENGINE'S LINE, MOVE BY MOVE/);
+    expect(SYSTEM_PROMPT).toMatch(/lineWalkthrough/);
+    expect(SYSTEM_PROMPT).toMatch(/VERBATIM/);
+  });
+
+  it("tells the model a trade is not a loss, with the pin case spelled out", () => {
+    expect(SYSTEM_PROMPT).toMatch(/A TRADE IS NOT A LOSS/);
+    expect(SYSTEM_PROMPT).toMatch(/queens coming off/i);
+    expect(SYSTEM_PROMPT).toMatch(/pinned against the KING genuinely cannot move/);
   });
 });

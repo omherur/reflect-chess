@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { formatScore } from "@/lib/chess/eval";
-import type { ConceptHighlight, StructuredExplanation } from "@/lib/types";
+import type { ConceptHighlight, LineStep, StructuredExplanation } from "@/lib/types";
 import { computeApproximate } from "./concepts";
+import { describePrincipalVariation } from "./pv-facts";
 import type { ExplainInput, ExplanationProvider } from "./types";
 
 // Sonnet, not Haiku: the personalized explanation is the core value of the
@@ -42,6 +43,33 @@ Never put an evaluation number anywhere in the summary — there is no room for 
 The summary must point at the engine's best move as the fix, and no other. If some different move also looks free or tempting, do NOT present it as what should have been played — the player sees your summary directly above a verdict on their own replay move, so naming a third move as "there for free" contradicts that verdict on the same screen and leaves them with no idea what they were supposed to play. Example of the failure: the best move is Nxe5, and the headline reads "Bg5 lets Black's e5 pawn sit while dxe5 was there for free" — dxe5 is not the engine's move, and the player had just been told dxe5 doesn't fix the position.
 
 The four detail fields are the layer for someone who read the summary and still doesn't see it. They must ADD something: the full mechanism, the engine's line narrated move by move, the principle behind it, the personal lesson. Restating the summary at greater length is the one thing they must never do.
+
+## WALK THE ENGINE'S LINE, MOVE BY MOVE
+
+The engine's best line very often opens with something that looks wrong: giving up a pawn, allowing a capture, walking into a check. A player looking at the board sees "the engine just lets the queen take my pawn" and should not have to read a paragraph to find out why. That is the single most confusing thing in a chess review, and it is what "lineWalkthrough" is for.
+
+Return "lineWalkthrough": an array of 2 to 6 objects, each with a "move" and a "note".
+- "move" must be copied VERBATIM from the principal variation given in the prompt, in the same order, starting from its first move and continuing with NO GAPS. Do not skip a move because it seems dull, do not reorder, do not correct, do not add one the engine didn't give. A step whose move doesn't match the line exactly causes the whole walkthrough to be discarded and the player sees bare notation instead.
+- "note" is at most 12 words on what that move accomplishes — plain language, no notation dumps.
+- A move that gives something up MUST say what is gained for it. "White takes the pawn — that's fine, it costs them the tempo" is useful; "White captures on d5" is just reading the notation aloud.
+- **Go far enough to reach the move that pays for the concession.** If the line gives up material, keep going until the move that wins it back or justifies it, and stop there. Stopping one move short of the point is worse than not annotating at all: it shows the player a sacrifice and never explains it. If the payoff comes later than the sixth move, use your notes on the earlier moves to say what is coming ("setting up c6 next, which hits both").
+
+Example, for the line Nd7 Qxd5 a6 Nc3 c6 Qd3 — note that Nc3 is included even though it is the quiet move of the sequence, because skipping it would break the order:
+"lineWalkthrough": [
+  {"move": "Nd7", "note": "retreats the knight and adds a second defender to d5"},
+  {"move": "Qxd5", "note": "the queen grabs the pawn — let it, that's the point"},
+  {"move": "a6", "note": "kicks the knight on b5 before it gets comfortable"},
+  {"move": "Nc3", "note": "the knight steps back, and now the trap is set"},
+  {"move": "c6", "note": "hits the queen and the knight at once, winning one back"}
+]
+
+## A TRADE IS NOT A LOSS
+
+Before saying a player loses a piece, check what recaptures. If the piece that captures can itself be taken by something of similar value, that is an exchange, not a loss, and describing it as a loss teaches the player to fear ordinary trades.
+
+This applies to pins especially. "The pawn can't move without losing your queen" is false when the queen is defended and the pinning piece is also a queen — Qxd8+ Kxd8 is simply queens coming off. Say what would actually be lost on balance, and if the answer is "nothing", don't raise it at all.
+
+Be equally careful with the word "can't". A pawn pinned along a file can still push; only its diagonal captures leave the line. A piece pinned against a queen can legally move — it just pays. Only a piece pinned against the KING genuinely cannot move.
 
 ## SAY LESS, NOT MORE — CUT WHATEVER ISN'T LOAD-BEARING
 
@@ -151,6 +179,7 @@ If the prompt gives you a low clock reading for a normally-classified move (not 
 ## OUTPUT FORMAT
 
 Respond with ONLY a single JSON object (no markdown fences, no commentary before or after) with exactly these keys. Every field below is held to the mechanism rule above — naming an outcome is not enough, state what concretely produces it:
+- "lineWalkthrough": the engine's line annotated move by move, per the section above. Omit it only if the prompt gave you no principal variation.
 - "summary": an object with exactly three string keys — "headline", "betterMove", "takeaway" — written to the word limits and the self-sufficiency standard in the two-layers section above. This is the layer almost every player will actually read.
 - "whatYourMoveDid": the actual chess idea behind the move the player made, in plain language, crediting genuine intent where there was any. Ground it in squares/pieces, not the eval.
 - "whatItMissed": the concrete tactical or strategic consequence — name the specific square(s), piece(s), and what the opponent could actually do about it. Never just name a concept in the abstract ("back-rank weakness" alone is not an answer — say which square, which piece, what happens next).
@@ -163,8 +192,17 @@ Respond with ONLY a single JSON object (no markdown fences, no commentary before
 
 Each of the four detail values should be 1-3 sentences (replayNote may run slightly longer when explaining a worse replay); the summary keeps to the tighter limits given above. Write directly to the player as "you". Keep it warm but never sugarcoat a real mistake — sugarcoating is a different failure than citing eval numbers, but it's still not helpful.`;
 
+/**
+ * The most annotated moves shown. Six rather than four because the point of
+ * an engine line — the move that pays for whatever it gave up — is often
+ * the fifth: cutting "Nd7 Qxd5 a6 Nc3 c6" at four shows the player a pawn
+ * being handed over and stops right before the move that wins it back.
+ */
+const MAX_WALKTHROUGH_STEPS = 6;
+
 interface ClaudeResponseShape {
   summary: { headline: string; betterMove: string; takeaway: string };
+  lineWalkthrough?: unknown;
   whatYourMoveDid: string;
   whatItMissed: string;
   whyBestIsBetter: string;
@@ -209,6 +247,14 @@ export function buildUserPrompt(input: ExplainInput): string {
     principalVariationSan.length > 0
       ? `Engine's principal variation: ${principalVariationSan.join(" ")}`
       : `Engine's principal variation: (none available)`,
+    ...(principalVariationSan.length > 0
+      ? [
+          ``,
+          `That line played out on the board, one move at a time. These are computed facts, not opinions — use them instead of working the line out yourself, and do not contradict them:`,
+          ...describePrincipalVariation(fenBefore, principalVariationSan),
+          ``,
+        ]
+      : []),
     `Detected board concepts after the played move: ${formatConceptList(conceptHighlights)}`,
     clockSecondsAtMove !== null
       ? `Player's clock reading right after this move: ${clockSecondsAtMove}s remaining.`
@@ -233,6 +279,33 @@ export function buildUserPrompt(input: ExplainInput): string {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Turns the model's annotated line into something safe to show, or nothing.
+ *
+ * The moves must be the engine's own, verbatim and in order from the start
+ * of the line — this is what stops an annotated walkthrough from quietly
+ * becoming a set of moves the engine never suggested, which would be far
+ * worse than showing plain notation. Any mismatch discards the whole
+ * walkthrough rather than showing a partly-trustworthy one.
+ */
+export function validateWalkthrough(
+  raw: unknown,
+  principalVariationSan: string[]
+): LineStep[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+
+  const steps: LineStep[] = [];
+  for (const [index, entry] of raw.slice(0, MAX_WALKTHROUGH_STEPS).entries()) {
+    if (!entry || typeof entry !== "object") return undefined;
+    const { move, note } = entry as { move?: unknown; note?: unknown };
+    if (typeof move !== "string" || typeof note !== "string") return undefined;
+    if (!note.trim()) return undefined;
+    if (move.trim() !== principalVariationSan[index]) return undefined;
+    steps.push({ move: move.trim(), note: note.trim() });
+  }
+  return steps.length >= 2 ? steps : undefined;
 }
 
 function extractText(message: Anthropic.Message): string {
@@ -311,6 +384,7 @@ export class ClaudeExplanationProvider implements ExplanationProvider {
     const concepts = input.conceptHighlights.map((c) => c.concept);
 
     return {
+      lineWalkthrough: validateWalkthrough(parsed.lineWalkthrough, input.principalVariationSan),
       summary: {
         headline: parsed.summary.headline.trim(),
         betterMove: parsed.summary.betterMove.trim(),

@@ -74,6 +74,22 @@ export interface ExplanationSummary {
   takeaway: string;
 }
 
+/**
+ * One move of the engine's line with a short note on what it accomplishes.
+ *
+ * The engine's best line routinely opens with something that looks wrong —
+ * conceding a pawn, allowing a capture — and raw notation gives a player no
+ * way to tell a blunder from a deliberate concession. "Nd7 Qxd5 a6 Nc3 c6"
+ * reads as "let the queen take my pawn for free" unless someone points out
+ * that c6 then hits the queen and the knight at once.
+ */
+export interface LineStep {
+  /** Verbatim from the principal variation, in order — never a move the engine didn't give. */
+  move: string;
+  /** A few words on what this move accomplishes. */
+  note: string;
+}
+
 export interface StructuredExplanation {
   /**
    * Optional only for backwards compatibility: explanations generated
@@ -84,6 +100,13 @@ export interface StructuredExplanation {
    * for it at each call site.
    */
   summary?: ExplanationSummary;
+  /**
+   * Optional: absent on explanations generated before it existed, on
+   * template-generated ones (which have no way to say what a move
+   * accomplishes), and whenever the model's steps didn't match the engine's
+   * actual line. The UI falls back to plain notation.
+   */
+  lineWalkthrough?: LineStep[];
   whatYourMoveDid: string;
   whatItMissed: string;
   whyBestIsBetter: string;
