@@ -12,7 +12,7 @@ import {
   replayVerdictBadgeLabel,
   tierLabel,
 } from "@/lib/format";
-import type { Color, KeyMomentVerdict } from "@/lib/types";
+import type { Color, ExplanationSummary, KeyMomentVerdict } from "@/lib/types";
 import { ReviewBoard } from "./review-board";
 import { ExplanationCard } from "@/components/explanation-card";
 import {
@@ -133,7 +133,7 @@ export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor
         </Button>
       )}
 
-      {expanded && <DeepDive km={km} userColor={userColor} />}
+      {expanded && <DeepDive km={km} userColor={userColor} summary={summary} />}
     </div>
   );
 }
@@ -172,7 +172,15 @@ function QuickVerdict({
  * concepts. Shown only on request — this is the layer for a player who read
  * the summary and still wants to know why.
  */
-function DeepDive({ km, userColor }: { km: KeyMomentVerdict; userColor: Color }) {
+function DeepDive({
+  km,
+  userColor,
+  summary,
+}: {
+  km: KeyMomentVerdict;
+  userColor: Color;
+  summary: ExplanationSummary;
+}) {
   const evalBeforeUser = toPerspective(km.evalBefore, userColor);
   const evalAfterUser = toPerspective(km.evalAfter, userColor);
 
@@ -202,13 +210,20 @@ function DeepDive({ km, userColor }: { km: KeyMomentVerdict; userColor: Color })
           tint="bg-[#2F4F3D]/10 border-[#2F4F3D]/25"
           iconClass="text-[#2F4F3D]"
         />
-        <ExplanationCard
-          icon={Sparkles}
-          label="What to remember"
-          text={km.explanation.remember}
-          tint="bg-[#6B4A6B]/10 border-[#6B4A6B]/25"
-          iconClass="text-[#6B4A6B]"
-        />
+        {/* A card that only repeats a line the player has already read is
+            worse than no card — it makes "Explain more" look like padding.
+            The takeaway is derived from `remember` whenever the summary
+            came from the deterministic template, so for those moments the
+            two are identical by construction. */}
+        {!repeatsSummary(km.explanation.remember, summary.takeaway) && (
+          <ExplanationCard
+            icon={Sparkles}
+            label="What to remember"
+            text={km.explanation.remember}
+            tint="bg-[#6B4A6B]/10 border-[#6B4A6B]/25"
+            iconClass="text-[#6B4A6B]"
+          />
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -257,6 +272,12 @@ function DeepDive({ km, userColor }: { km: KeyMomentVerdict; userColor: Color })
       </div>
     </div>
   );
+}
+
+/** Whether a detail card would only restate a line already shown above it. */
+function repeatsSummary(cardText: string, summaryLine: string): boolean {
+  const normalize = (text: string) => text.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalize(cardText) === normalize(summaryLine);
 }
 
 function InfoBlock({ label, value }: { label: string; value: string }) {

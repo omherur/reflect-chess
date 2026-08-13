@@ -39,6 +39,8 @@ The summary must be SELF-SUFFICIENT: a player who reads only those three lines a
 
 Never put an evaluation number anywhere in the summary — there is no room for a symptom when you only get three sentences.
 
+The summary must point at the engine's best move as the fix, and no other. If some different move also looks free or tempting, do NOT present it as what should have been played — the player sees your summary directly above a verdict on their own replay move, so naming a third move as "there for free" contradicts that verdict on the same screen and leaves them with no idea what they were supposed to play. Example of the failure: the best move is Nxe5, and the headline reads "Bg5 lets Black's e5 pawn sit while dxe5 was there for free" — dxe5 is not the engine's move, and the player had just been told dxe5 doesn't fix the position.
+
 The four detail fields are the layer for someone who read the summary and still doesn't see it. They must ADD something: the full mechanism, the engine's line narrated move by move, the principle behind it, the personal lesson. Restating the summary at greater length is the one thing they must never do.
 
 ## SAY LESS, NOT MORE — CUT WHATEVER ISN'T LOAD-BEARING
