@@ -1,16 +1,31 @@
+"use client";
+
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { formatScore, toPerspective, describeScore } from "@/lib/chess/eval";
+import { explanationSummary } from "@/lib/explanation-summary";
 import {
   classificationClass,
   classificationLabel,
+  moveFraming,
+  moveWasTheFault,
   replayVerdictBadgeClass,
   replayVerdictBadgeLabel,
   tierLabel,
 } from "@/lib/format";
-import type { Color, KeyMomentVerdict } from "@/lib/types";
+import type { Color, ExplanationSummary, KeyMomentVerdict, LineStep } from "@/lib/types";
 import { ReviewBoard } from "./review-board";
 import { ExplanationCard } from "@/components/explanation-card";
-import { Sparkles, Target, TriangleAlert, Lightbulb, Quote } from "lucide-react";
+import {
+  ChevronDown,
+  Eye,
+  Lightbulb,
+  Quote,
+  Sparkles,
+  Target,
+  TriangleAlert,
+} from "lucide-react";
 
 const TIER_BADGE_CLASS: Record<string, string> = {
   CRITICAL: "bg-[#8B2E2E]/12 text-[#8B2E2E] border-[#8B2E2E]/35",
@@ -18,9 +33,26 @@ const TIER_BADGE_CLASS: Record<string, string> = {
   MINOR: "bg-stone-100 text-stone-600 border-stone-200",
 };
 
+/**
+ * The verdict, in two layers.
+ *
+ * A player reviewing a game has several of these to get through, and the
+ * thing that makes a review actually happen is being able to read one and
+ * move on. So the panel opens on a three-line summary — what happened, what
+ * was better, what to take away — sitting next to the board, and everything
+ * that takes longer to read (the full mechanism, the engine's line narrated
+ * move by move, the eval numbers, the detected concepts) waits behind
+ * "Explain more".
+ *
+ * The split is presentation only: the deep layer was generated at the same
+ * time as the summary and is already on the client, so opening it is
+ * instant and costs nothing. Nobody is being shown a shallower analysis —
+ * they're being shown the same analysis in the order that a person actually
+ * reads one.
+ */
 export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor: Color }) {
-  const evalBeforeUser = toPerspective(km.evalBefore, userColor);
-  const evalAfterUser = toPerspective(km.evalAfter, userColor);
+  const [expanded, setExpanded] = useState(false);
+  const summary = explanationSummary(km.explanation);
   const from = km.originalUci.slice(0, 2);
   const to = km.originalUci.slice(2, 4);
   const bestFrom = km.bestMoveUci.slice(0, 2);
@@ -29,18 +61,31 @@ export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor
 
   return (
     <div className="flex flex-col gap-6 duration-500 animate-in fade-in-0 slide-in-from-bottom-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span
-          className={`rounded-full border px-3 py-1 text-sm font-semibold shadow-sm ${classificationClass(km.classification)}`}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={`rounded-full border px-3 py-1 text-sm font-semibold shadow-sm ${classificationClass(km.classification)}`}
+          >
+            {classificationLabel(km.classification)}
+          </span>
+          <span
+            className={`rounded-full border px-2.5 py-1 text-xs font-medium ${TIER_BADGE_CLASS[km.importanceTier]}`}
+          >
+            {tierLabel(km.importanceTier)} moment
+          </span>
+          <span className="text-sm text-stone-500">{km.selectionReason}</span>
+        </div>
+        {/* Answers the question a player has before any other: do I need to
+            stop playing this move, or was it fine and I missed something
+            better? A "Good move" badge above a "winning chances dropped"
+            line reads as a contradiction until this says which it is. */}
+        <p
+          className={`text-base font-medium ${
+            moveWasTheFault(km.classification) ? "text-destructive" : "text-stone-700"
+          }`}
         >
-          {classificationLabel(km.classification)}
-        </span>
-        <span
-          className={`rounded-full border px-2.5 py-1 text-xs font-medium ${TIER_BADGE_CLASS[km.importanceTier]}`}
-        >
-          {tierLabel(km.importanceTier)} moment
-        </span>
-        <span className="text-sm text-stone-500">{km.selectionReason}</span>
+          {moveFraming(km.classification)}
+        </p>
       </div>
 
       <YourWordsSection km={km} />
@@ -75,10 +120,183 @@ export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor
           <div className="grid grid-cols-2 gap-3 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm">
             <InfoBlock label="You played" value={km.originalSan} />
             <InfoBlock label="Engine's best" value={km.bestMoveSan} />
-            <InfoBlock label="Eval before" value={`${formatScore(evalBeforeUser)} (${describeScore(evalBeforeUser)})`} />
-            <InfoBlock label="Eval after your move" value={`${formatScore(evalAfterUser)} (${describeScore(evalAfterUser)})`} />
           </div>
 
+          <QuickVerdict summary={summary} />
+
+          {km.explanation.lineWalkthrough && (
+            <EngineLineWalkthrough
+              bestMoveSan={km.bestMoveSan}
+              steps={km.explanation.lineWalkthrough}
+            />
+          )}
+
+          {km.explanation.approximate && (
+            <p className="text-xs italic text-stone-500">
+              This one is approximate — it&apos;s based on pattern heuristics, not a certainty.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Deliberately full-width and unmissable, but visually quieter than
+          anything above it: the point is that most reveals end here. */}
+      {!expanded && (
+        <Button
+          type="button"
+          variant="outline"
+          size="lg"
+          onClick={() => setExpanded(true)}
+          className="w-full gap-2 border-dashed"
+        >
+          <Eye className="size-4" />
+          Explain more
+          <ChevronDown className="size-4" />
+        </Button>
+      )}
+
+      {expanded && <DeepDive km={km} userColor={userColor} summary={summary} />}
+    </div>
+  );
+}
+
+/**
+ * The three lines that carry the whole verdict. Each one is deliberately a
+ * single sentence — the moment this grows to a paragraph, the fast review
+ * path is gone and the "Explain more" button below it has no job left.
+ */
+function QuickVerdict({
+  summary,
+}: {
+  summary: { headline: string; betterMove: string; takeaway: string };
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-start gap-2.5">
+        <Target className="mt-0.5 size-4 shrink-0 text-primary" />
+        <p className="text-base leading-snug font-medium text-stone-800">{summary.headline}</p>
+      </div>
+      <div className="flex items-start gap-2.5">
+        <Lightbulb className="mt-0.5 size-4 shrink-0 text-[#2F4F3D]" />
+        <p className="text-sm leading-snug text-stone-700">{summary.betterMove}</p>
+      </div>
+      <div className="flex items-start gap-2.5 rounded-md border border-[#6B4A6B]/25 bg-[#6B4A6B]/8 px-3 py-2">
+        <Sparkles className="mt-0.5 size-4 shrink-0 text-[#6B4A6B]" />
+        <p className="text-sm leading-snug text-stone-700">{summary.takeaway}</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The engine's line, annotated a move at a time.
+ *
+ * Raw notation is unreadable at a glance when the line opens with a
+ * concession — "Nd7 Qxd5 a6 Nc3 c6" looks like handing over a pawn for
+ * nothing unless someone says that c6 then hits the queen and the knight
+ * together. This sits in the first layer, next to the board, because
+ * "why would I allow that?" is the question a player has while looking at
+ * the position, not after opening a second panel.
+ */
+function EngineLineWalkthrough({
+  bestMoveSan,
+  steps,
+}: {
+  bestMoveSan: string;
+  steps: LineStep[];
+}) {
+  return (
+    <div className="rounded-lg border border-[#2F4F3D]/25 bg-[#2F4F3D]/[0.06] p-3">
+      <p className="mb-2 text-xs font-medium tracking-wide text-stone-500 uppercase">
+        How {bestMoveSan} plays out
+      </p>
+      <ol className="flex flex-col gap-1.5">
+        {steps.map((step, index) => (
+          <li key={`${step.move}-${index}`} className="flex items-baseline gap-2.5 text-sm">
+            <span className="min-w-[3.25rem] shrink-0 font-mono font-semibold text-stone-800">
+              {step.move}
+            </span>
+            <span className="text-stone-600">{step.note}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/**
+ * Everything that didn't fit in three lines: the full four-card
+ * explanation, the engine's own numbers and line, and the verified board
+ * concepts. Shown only on request — this is the layer for a player who read
+ * the summary and still wants to know why.
+ */
+function DeepDive({
+  km,
+  userColor,
+  summary,
+}: {
+  km: KeyMomentVerdict;
+  userColor: Color;
+  summary: ExplanationSummary;
+}) {
+  const evalBeforeUser = toPerspective(km.evalBefore, userColor);
+  const evalAfterUser = toPerspective(km.evalAfter, userColor);
+
+  return (
+    <div className="flex flex-col gap-4 duration-300 animate-in fade-in-0 slide-in-from-top-2">
+      <Separator />
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <ExplanationCard
+          icon={Target}
+          label="What your move did"
+          text={km.explanation.whatYourMoveDid}
+          tint="bg-primary/8 border-primary/20"
+          iconClass="text-primary"
+        />
+        <ExplanationCard
+          icon={TriangleAlert}
+          label="What it missed"
+          text={km.explanation.whatItMissed}
+          tint="bg-[#B8860B]/10 border-[#B8860B]/25"
+          iconClass="text-[#8A6108]"
+        />
+        <ExplanationCard
+          icon={Lightbulb}
+          label="Why the recommended move is stronger"
+          text={km.explanation.whyBestIsBetter}
+          tint="bg-[#2F4F3D]/10 border-[#2F4F3D]/25"
+          iconClass="text-[#2F4F3D]"
+        />
+        {/* A card that only repeats a line the player has already read is
+            worse than no card — it makes "Explain more" look like padding.
+            The takeaway is derived from `remember` whenever the summary
+            came from the deterministic template, so for those moments the
+            two are identical by construction. */}
+        {!repeatsSummary(km.explanation.remember, summary.takeaway) && (
+          <ExplanationCard
+            icon={Sparkles}
+            label="What to remember"
+            text={km.explanation.remember}
+            tint="bg-[#6B4A6B]/10 border-[#6B4A6B]/25"
+            iconClass="text-[#6B4A6B]"
+          />
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="grid grid-cols-2 gap-3 rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm">
+          <InfoBlock
+            label="Eval before"
+            value={`${formatScore(evalBeforeUser)} (${describeScore(evalBeforeUser)})`}
+          />
+          <InfoBlock
+            label="Eval after your move"
+            value={`${formatScore(evalAfterUser)} (${describeScore(evalAfterUser)})`}
+          />
+        </div>
+
+        <div className="flex flex-col gap-4">
           {km.principalVariation.length > 0 && (
             <div>
               <p className="text-sm font-medium text-stone-700">Engine line</p>
@@ -97,7 +315,10 @@ export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor
                       <span className="font-medium capitalize text-stone-800">{h.concept}</span> —{" "}
                       {h.note}
                       {h.squares.length > 0 && (
-                        <span className="font-mono text-xs text-stone-400"> ({h.squares.join(", ")})</span>
+                        <span className="font-mono text-xs text-stone-400">
+                          {" "}
+                          ({h.squares.join(", ")})
+                        </span>
                       )}
                     </span>
                   </li>
@@ -107,48 +328,14 @@ export function RevealPanel({ km, userColor }: { km: KeyMomentVerdict; userColor
           )}
         </div>
       </div>
-
-      <Separator />
-
-      <div className="flex flex-col gap-3">
-        {km.explanation.approximate && (
-          <p className="text-xs italic text-stone-500">
-            This explanation is approximate — it&apos;s based on pattern heuristics, not a certainty.
-          </p>
-        )}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <ExplanationCard
-            icon={Target}
-            label="What your move did"
-            text={km.explanation.whatYourMoveDid}
-            tint="bg-primary/8 border-primary/20"
-            iconClass="text-primary"
-          />
-          <ExplanationCard
-            icon={TriangleAlert}
-            label="What it missed"
-            text={km.explanation.whatItMissed}
-            tint="bg-[#B8860B]/10 border-[#B8860B]/25"
-            iconClass="text-[#8A6108]"
-          />
-          <ExplanationCard
-            icon={Lightbulb}
-            label="Why the recommended move is stronger"
-            text={km.explanation.whyBestIsBetter}
-            tint="bg-[#2F4F3D]/10 border-[#2F4F3D]/25"
-            iconClass="text-[#2F4F3D]"
-          />
-          <ExplanationCard
-            icon={Sparkles}
-            label="What to remember"
-            text={km.explanation.remember}
-            tint="bg-[#6B4A6B]/10 border-[#6B4A6B]/25"
-            iconClass="text-[#6B4A6B]"
-          />
-        </div>
-      </div>
     </div>
   );
+}
+
+/** Whether a detail card would only restate a line already shown above it. */
+function repeatsSummary(cardText: string, summaryLine: string): boolean {
+  const normalize = (text: string) => text.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalize(cardText) === normalize(summaryLine);
 }
 
 function InfoBlock({ label, value }: { label: string; value: string }) {
@@ -244,4 +431,3 @@ function YourWordsSection({ km }: { km: KeyMomentVerdict }) {
     </div>
   );
 }
-

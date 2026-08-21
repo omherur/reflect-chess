@@ -38,10 +38,11 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
 - **react-chessboard ^5.10.0** for the interactive board; a hand-rolled unicode-glyph `MiniBoard` (no react-chessboard) for lightweight dashboard thumbnails.
 - **Stockfish 18 WASM** via a Node child process (`src/server/engine/runner.cjs`, UCI protocol). Wrapped in `src/server/engine/engine.ts`'s `StockfishService` — **a single lazy global singleton with one serialized request queue**. This is important context for the open batch-analysis issue below (see §7).
 - **Claude API** (`@anthropic-ai/sdk`) for personalized explanation generation — model is **`claude-sonnet-5`** (upgraded from Haiku; Sonnet was deliberately chosen since explanation quality is the core product value). Automatic fallback to a deterministic template provider on any failure or missing key. **`ANTHROPIC_API_KEY` is configured and the AI path is verified working live** (see §6 — this was broken for two independent reasons, both fixed). **Important:** `claude-sonnet-5` defaults to adaptive extended thinking when the `thinking` param is omitted, and thinking tokens draw from the same `max_tokens` budget as the answer — always pass `thinking: { type: "disabled" }` on calls that need a reliable structured-JSON answer (see `src/server/explain/claude-provider.ts` and `src/server/summary/claude-provider.ts`), or a call can silently return empty text with `stop_reason: "max_tokens"`.
-- **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
+- **Stripe** (`stripe` ^22) for billing — Stripe-hosted Checkout plus the Customer Portal, so no card data ever reaches this app and there is no publishable key in the repo. **The installed SDK pins API version `2026-07-29.dahlia`, where `Subscription.current_period_end` no longer exists** — it moved onto the subscription's *items*, and reading the old field yields `undefined` and an Invalid Date. Same story for `Invoice.subscription`, now `invoice.parent.subscription_details.subscription`. Both are handled in `src/server/billing/`; see §11.
+- **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9. One exception, and it's one-way: a `public.subscriptions` table in Supabase receives a **reporting mirror** of billing state, written by the app and never read back (§11).
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **next-themes** for dark mode (wired to a `ThemeProvider` + header toggle button).
-- **Vitest** for tests (273 tests / 17 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
+- **Vitest** for tests (359 tests / 22 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
 
 ---
 
@@ -60,6 +61,9 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
   - `followUpQuestion` / `followUpAnswer` (nullable strings) — populated only when the initial `thoughts` answer was judged "thin" by `src/server/explain/followup.ts`'s `isThinReflection()` (word-count + filler-phrase heuristic), and the user then answered the one generated follow-up. Never re-asked for the same key moment.
   - `replayEvalCp`/`replayEvalMate`/`replayVerdict`, `explanation` (JSON-serialized `StructuredExplanation`, generated once at reflect-time, personalized to the specific reasoning + replay move).
 - **AnalysisCache** — engine result cache keyed by `(fen, settings)`, shared across all games/users.
+- **Billing columns on `User`** — `stripeCustomerId`, `stripeSubscriptionId`, `subscriptionStatus`, `subscriptionPriceId`, `currentPeriodEnd`, `cancelAtPeriodEnd`. A **mirror**, not a source of truth: Stripe owns all of it and the webhook keeps these in step, so rendering a page never costs an API call. `subscriptionStatus` stores Stripe's string verbatim rather than a boolean, because `past_due` has to be distinguishable from `canceled` — one keeps access, the other doesn't.
+- **`Game.analysisChargedAt`** — the entire usage meter. Set once, at dispatch, by `POST /api/games/[id]/analyze`, and only when null, so re-analysing a game you already paid for is free forever. Cleared if the run fails, so a crashed engine isn't billed. The seeded demo game never has one — it's inserted pre-analyzed and never passes through the route, which is why **no `platform === "demo"` filter exists anywhere in the billing code, and adding one would be dead code.**
+- **StripeEvent** — one row per handled webhook event, keyed on Stripe's own `evt_…` id. Stripe retries for up to 3 days with no ordering guarantee, so the unique id is what makes a redelivery a no-op.
 - **WaitlistSignup** — a pre-launch email signup from the landing page. Deliberately **not** related to `User`: someone on the waitlist has no account and may never make one. `email` is unique and stored normalized (trimmed + lowercased via `src/lib/email.ts`, so casing/whitespace variants are one person); `source` records which CTA it came from so placements can be compared without a schema change.
 
 ---
@@ -115,12 +119,13 @@ Two SVG gotchas this cost time on, worth not rediscovering: a `*/` inside a bloc
 | Navbar auth state | **Working** | Signed out shows **Sign in** (ghost) + **Sign up** (primary); signed in shows the display name and a **Sign out** button. Display name is derived from the email's local part at first sign-in and is cosmetic only |
 | **IDOR fix** | **Fixed & verified** | All game-scoped routes (`/api/games/[id]`, `.../analyze`, `.../reflect`, `.../hint`) now check `game.userId === user.id`; previously did not |
 | Key-moment detection/selection | **Working, recently overhauled** | Now uses **win-probability** (`winProbLoss` in `src/lib/chess/eval.ts`, Lichess-style logistic curve), not raw centipawn delta, as the significance metric. Verified live: some games now correctly surface fewer key moments than the old minimum guarantee would have padded to |
-| Concept detection (pin/fork/skewer/hanging piece/back-rank/king exposure) | **Working, hardened** | Each detector verified against real chess rules (color, line-of-sight, alignment) with true-positive + false-positive-trap test coverage. A real bug (mixed-color "pin" through a blocking pawn) was found and fixed with a permanent regression test |
+| Concept detection (pin/fork/skewer/hanging piece/back-rank/king exposure) | **Working, hardened, materiality-gated, relative pins added** | Each detector verified against real chess rules (color, line-of-sight, alignment) with true-positive + false-positive-trap coverage. A real bug (mixed-color "pin" through a blocking pawn) was found and fixed with a permanent regression test. **Being geometrically real is no longer sufficient** — see §10: a tactic whose targets are adequately defended wins nothing and is now dropped, via a static exchange evaluation in `src/server/explain/exchange.ts` |
 | Concept **relevance filtering** | **Working** | `filterRelevantConcepts` in `src/server/explain/concepts.ts` — a concept only survives if spatially connected to the move played, the best move, or the immediate PV. Fixes concepts like back-rank weakness being mentioned when irrelevant to the specific move |
 | Reflection capture (reasoning + replay move) | **Working** | Two-question core mechanic, gate-verified repeatedly |
 | Reflection capture — confidence/tags/follow-up/voice | **Working, recently added** | 1-5 confidence (required), 6 optional tags, adaptive one-shot follow-up for thin answers, Web Speech API voice input (graceful no-op on unsupported browsers via `useSyncExternalStore`, not a hydration-unsafe effect). The "settle on this move over other options" follow-up question is skipped when the replay move equals the original — nothing to explain there |
-| Explanation generation | **Working via Claude, verified live** | See §6 — was broken for two independent reasons (missing key, then an adaptive-thinking token-budget bug), both fixed and verified with real API calls. "Why the recommended move is stronger" now names an underlying chess principle (center control, king safety, piece activity, etc.), not just a restated eval. The replay move gets a distinct scannable verdict badge (Matches best / Improvement / Equal to original / etc.) plus explicit acknowledgment in prose |
-| Reveal panel layout | **Working, recently restructured** | "Your reasoning"/"Your replay move" (+ confidence dots, tags, follow-up) now render in a quote-styled block at the top of the reveal, above the four AI-explanation cards |
+| Explanation generation | **Working via Claude, verified live, now two-layer** | See §6 — was broken for two independent reasons (missing key, then an adaptive-thinking token-budget bug), both fixed and verified with real API calls. "Why the recommended move is stronger" now names an underlying chess principle (center control, king safety, piece activity, etc.), not just a restated eval. The replay move gets a distinct scannable verdict badge (Matches best / Improvement / Equal to original / etc.) plus explicit acknowledgment in prose |
+| Reveal panel layout | **Working, restructured again** | "Your reasoning"/"Your replay move" (+ confidence dots, tags, follow-up) render in a quote-styled block at the top. Below it the reveal now opens on a **three-line summary** beside the board; the four AI cards, eval numbers, engine line and concept list sit behind an **Explain more** button — see §10 |
+| Reveal progress bar | **Working, new** | The reflect route streams NDJSON stage events while it works, and the form shows a real staged progress bar instead of a static "Revealing…" — see §10. Verified that Next 16 + Turbopack flushes the events incrementally rather than buffering them |
 | Pre-reveal focused view | **Working** | Move list + sidebar visually dim (`opacity-40`, brightens on hover) while a key moment is still `PENDING` |
 | Hint button | **Working** | Non-revealing, deterministic + concept-flavored, never names a move or shows eval |
 | Dashboard (grid, thumbnails, bulk analyze, filters, sort, momentum) | **Working** | Includes the "N thoughts recorded" persistent counter (distinct from the 3 stat cards) |
@@ -136,6 +141,9 @@ Two SVG gotchas this cost time on, worth not rediscovering: a `*/` inside a bloc
 | Waitlist capture | **Working, new** | `POST /api/waitlist` + `WaitlistForm` in **two** places — the hero (`source: "landing-hero"`, directly under the two CTAs) and the closing section (`source: "landing-closing"`), which is what the `source` column is for. Public route (no session), validated by `src/lib/email.ts` on both sides, `upsert`-based so re-signing-up is a success (`alreadyOnList: true`) rather than an error and the original signup time survives. Verified end to end through the real UI; there is **no admin view of signups yet** — read them with Prisma |
 | Demo game seeded on signup | **Working, new** | Every **new** account gets one fully analyzed game inserted at signup, so the landing CTA ("your first game comes back analyzed") is true on arrival instead of showing an empty dashboard. `src/server/demo/seed-demo-game.ts` inserts from `src/server/demo/demo-game.ts` — a checked-in fixture exported from a real analysis run (`prisma/export-demo-game.ts` regenerates it), **not** a copy of a DB row, because a fresh production database has nothing to copy and signup must not depend on the engine. Stored as `platform: "demo"` / `externalId: "demo-seed-v1"`, which `platformLabel` renders as "Demo game" so it can't be mistaken for the user's own. Idempotent (unique on `[userId, platform, externalId]`) and it **never throws** — a seeding failure must not break a login. `/api/auth/login` is no longer an `upsert`, because upsert can't tell you whether it created the account |
 | Admin area (signups + waitlist) | **Working, new** | `/admin` — every account (name, signup time, games, reflections, linked Chess.com username) and every waitlist signup (email, source, time), plus five summary counters. **Gated by an `ADMIN_KEY` secret, not by identity** — see §8. Server-rendered, and the data is only queried *after* the gate passes, so a locked visitor's HTML contains no names or emails at all rather than fetching and hiding them |
+| **Subscriptions & usage limits** | **Working, new** | Free = 5 games analyzed per calendar month (UTC), Pro = **$8/month for 30**. See §11. Metered on *analyze*, not import. Verified live against the real test-mode Stripe account end to end |
+| Upgrade surfaces (plan chip, dashboard prompt, plan comparison) | **Working, new** | Escalating rather than uniformly loud — see §11. All four prompt states plus both chip states rendered and checked in light and dark |
+| Stripe webhook | **Working, new** | `/api/stripe/webhook`, signature-verified over the raw body, deduplicated on the event id, re-fetches the subscription rather than trusting the payload. Verified with genuinely-signed events: provision, replay, cancel-at-period-end, deletion |
 | Explanation provenance debug view | **Working** | `/admin/explanations` — shows the last N generated explanations, whether each came from Claude / was grounding-patched / fell back to the template, and why, with an auto-refreshing table and a fallback-ratio warning banner. **Now behind the same `ADMIN_KEY` gate** (it was previously readable by any signed-in user); both the page and `/api/admin/explanations` are gated, since gating only the page would leave the entries one fetch away |
 
 ---
@@ -187,9 +195,13 @@ Note: hydration errors in Next 16 dev surface **only in the dev-tools overlay**,
 ## 7. Next Steps / Open Work
 
 1. **Voice input** has only been feature-detection-tested (mic icon appears/disappears correctly); actual speech-to-text transcription accuracy has not been verified live (no real microphone input in this environment).
-2. **Concept-relevance filter is sometimes overly strict.** `filterRelevantConcepts` occasionally drops a real, correct tactic (observed: a genuine pin) because its squares weren't judged "connected enough" to the move/PV, causing the grounding check to unnecessarily patch otherwise-good AI explanation fields back to template text. Not fixed — a real gap, low frequency.
-3. General note: `src/proxy.ts` gates **everything** not in `PUBLIC_PREFIXES` behind a session — any new route meant for signed-out visitors (a public API, a static asset served from `app/`) must be added there, or it silently 401s/redirects to `/login`. This bit both `/api/waitlist` and `/icon.svg` when they were added.
-4. General note: after any schema change, remember the non-interactive `prisma migrate dev` limitation in §2 — use the manual diff+deploy workaround, not `migrate dev` directly. Also remember: **the running dev server's Prisma Client is loaded once at process start** — after `npx prisma generate`, the dev server must be restarted (not just hot-reloaded) or it'll throw "Unknown field" errors against the new schema.
+2. **Concept-relevance filter is sometimes overly strict.** `filterRelevantConcepts` occasionally drops a real, correct tactic (observed: a genuine pin) because its squares weren't judged "connected enough" to the move/PV. With an empty verified-concept list, any tactical word the model uses then counts as a grounding violation and gets patched back to template text. Still unfixed, but it now hurts less: `applyGrounding` prefers the model's own *surviving* prose over the template when replacing a summary line (§10).
+3. **The signed-in reveal flow has not been clicked through since the §10 changes.** The summary layer, the "Explain more" toggle and the progress bar were verified by unit tests, by a real Claude run against real dev-DB moments, and by confirming the route streams incrementally — but not by a human-eye pass of the rendered panel, because doing so requires signing in and Claude may not enter a password. Worth one look.
+4. General note: `src/proxy.ts` gates **everything** not in `PUBLIC_PREFIXES` behind a session — any new route meant for signed-out visitors (a public API, a static asset served from `app/`) must be added there, or it silently 401s/redirects to `/login`. This bit both `/api/waitlist` and `/icon.svg` when they were added, and `/api/stripe/webhook` is now on the list for the same reason — Stripe sends no cookie, so gating it would 401 every event and subscriptions would silently never provision.
+5. **Local webhooks need `stripe listen` running.** Test-mode billing is otherwise fully set up (§11). The signing secret in `.env` belongs to the CLI, so events only arrive while `stripe listen --forward-to localhost:3000/api/stripe/webhook` is up; with it stopped, checkout still charges but nothing provisions. **Production needs its own registered endpoint and its own, different secret.**
+6. **The billing components have had a human-eye pass; the signed-in pages themselves have not.** Every upgrade surface (`PlanBadge`, all four `UpgradePrompt` states, `PlanComparison`) was rendered and checked in both light and dark via a temporary unauthenticated preview route, which found two real defects — a "Recommended" badge clipped in half by the `Card` primitive's `overflow-hidden`, and the app's only British spelling ("Analysing"). What has *not* been seen is those components in situ on the real `/billing` page and dashboard with a live session, since that needs a password. Same limitation as note 3.
+7. **`tsconfig.json` now excludes `lumos/`.** That directory is an untracked, self-contained Next scaffold that happens to sit inside the repo; the root `**/*.tsx` include was pulling it in and failing `next build` on its own `~/*` alias. Unrelated to this app — delete it whenever you want the tree tidy.
+8. General note: after any schema change, remember the non-interactive `prisma migrate dev` limitation in §2 — use the manual diff+deploy workaround, not `migrate dev` directly. Also remember: **the running dev server's Prisma Client is loaded once at process start** — after `npx prisma generate`, the dev server must be restarted (not just hot-reloaded) or it'll throw "Unknown field" errors against the new schema.
 
 ---
 
@@ -237,3 +249,269 @@ Email/password auth via **Supabase Auth**; application data stays in local Prism
 **Migration note:** this replaced password-less name login outright, by explicit decision. Pre-existing rows (`Om`, `Local Player`) are still in the dev database with their games, but have no `supabaseUserId` and are therefore unreachable — nobody can sign in as them. They are not a bug; deleting them is safe whenever you want the database tidy.
 
 ---
+
+## 10. The Two-Layer Verdict, and What Counts as a Finding
+
+Three changes that share one goal: a player should be able to review a whole game at the pace of a game, and everything they read should be worth reading.
+
+### Only material tactics are reported
+
+A tactic can be geometrically real and worth nothing. The dev database had **38 stored "skewers" and every one of them was noise** — variations on "the White queen on h5 attacks the Black pawn on g5, which must move and expose the Black pawn on d5 behind it". A queen does not force a defended pawn to move.
+
+`src/server/explain/exchange.ts` adds a static exchange evaluation: play the cheapest legal capture onto a square, recurse for the recapture, clamp at zero because either side may stop. It enumerates **legal** moves, not geometric attackers, so a pinned attacker correctly threatens nothing. Each detector is now gated on it:
+
+- **hanging piece** — undefended *and* actually winnable.
+- **fork** — still needs two targets, but at least one has to be worth taking. Knight forking two defended rooks: reported. Knight forking two defended knights: dropped.
+- **pin** — the pinned piece must be winnable now, or attackers must at least match defenders (a pinned piece can't run, so matching is enough to win it by piling on).
+- **skewer** — the front piece must be under a real threat, and what's behind it must be worth a knight or more.
+- Findings are capped at **three** per moment.
+
+Measured over the whole dev DB, apples-to-apples through the same relevance filter: skewer 38 → 0, hanging 30 → 28, pin 8 → 7, fork 3 → 2, back-rank and king exposure unchanged (no material gate applies to them). Moments carrying at least one finding: 70 → 45. The detector is not dead — scanning all 6,462 stored positions still finds 10 skewers, all genuine piece-behind-piece shapes.
+
+**If you loosen a gate, re-run that audit before believing the result.** The first version of the skewer gate counted the front piece as a defender of the piece behind it, which silently suppressed the single most common real skewer there is (a queen in front of a rook — the queen "defends" it right up until it has to run). Only the existing true-positive test caught it.
+
+### Truth and usefulness are different questions
+
+Found by looking at a real reveal: three of the four explanation cards had been replaced with generic template text, and the cause was the grounding check, not the model.
+
+The check asks "did a detector verify this term". It was being handed the **displayed** concept list — the one `filterRelevantConcepts` has already narrowed for usefulness — so anything true but not shown counted as invented. On the moment in question (`Bg5` in `r1bqk2r/pppp1ppp/1bn2n2/4p3/2BPP3/2P2N2/PP3PPP/RNBQK2R w KQkq - 1 6`) the stored list was empty, so *every* tactical word the model wrote was a violation.
+
+Three separate causes, all now fixed:
+
+1. **The allow-list came from the display set.** `verifiedConceptVocabulary()` now builds it from the board instead: unfiltered concepts on the position after the move, plus those along the principal variation the prompt asks the model to narrate. `findConcepts` takes `{ requireMaterial: false }` for this — displaying a finding asks "is this worth attention", grounding asks only "is this true", and one list can't answer both.
+2. **The detectors only ever saw one side.** They read threats belonging to the side to move, which after the player's move means threats *against* the player. `Bg5` pinning a knight is the player's own pin, so it was structurally invisible — the player literally wrote "pinning the knight to the queen" and the system could not confirm it. The vocabulary now also runs detection with the side to move flipped (a null move). **The displayed list is still deliberately one-sided**; only the allow-list sees both.
+3. **Relative pins weren't detected at all** — only pins against the king. A knight pinned to a queen is one of the commonest shapes in chess. `findRelativePin` covers it; the note says "can't move without losing" rather than "exposing", since a relative pin costs material rather than being illegal.
+
+Also fixed: the pin pattern in `TACTICAL_TERMS` matched "pin/pinned/pinning" but not **"pins"**, so the same claim was checked or waved through depending on verb form.
+
+After all four, that reveal regenerates with every field model-written and specific — "The pawn on e5 was only defended by the knight on f6, and Bg5 does nothing to challenge that" in place of "It missed a stronger continuation the engine found in this position."
+
+Displayed concepts across the dev DB, versus the original numbers above: pin 9 → 24 (relative pins are common and real), skewer 38 → 0, moments carrying a finding 71 → 54.
+
+**The guarantee is unchanged in kind and weaker in degree.** Every term is still one a deterministic detector verified on a real position; none is a model assertion. But a tactic verified several plies into the engine's line can now be cited as though it were on the board today, which is why the PV window is short.
+
+### The verdict is read in two layers
+
+`StructuredExplanation` gained an optional `summary` of three short lines: `headline`, `betterMove`, `takeaway`. The reveal panel opens on those, beside the board, and puts the four detail cards, the eval numbers, the engine line and the concept list behind an **Explain more** button.
+
+- **`summary` is optional purely for backwards compatibility** — explanations generated before this are stored as JSON on their reflection and can't gain fields. Always read it through `explanationSummary()` in `src/lib/explanation-summary.ts`, which derives one from the deep fields when it's missing, so the two cases are indistinguishable at the call site. Never read `explanation.summary` directly.
+- The Claude provider **requires** the summary and throws without it, so a missing one takes the logged fallback path and shows up on `/admin/explanations` rather than being silently patched over. The prompt gained a two-layers section (with per-line word limits, and a ban on eval numbers in the summary) and a "cut whatever isn't load-bearing" section; all three worked examples now include a summary.
+- The grounding check covers the summary too, addressed as `summary.headline` etc. When a summary line has to be replaced, `applyGrounding` **prefers the model's own surviving deep field** (headline ← `whatItMissed`, betterMove ← `whyBestIsBetter`, takeaway ← `remember`) over the template's generic line — that text passed the identical check, and the summary is the layer everyone reads. Verified live: a patched headline went from "Qc7 gave up a small amount of your advantage" to "Qc7 develops safely, but it skips the chance to trade off White's active knight on c3 with tempo."
+- Splitting the layers costs nothing at runtime: the deep fields were always generated in the same call and are already on the client. Nobody is shown a shallower analysis, only a differently ordered one.
+
+### Making the analysis readable at a glance
+
+Three problems found by looking at a second rendered reveal, all about a player being able to trust and follow what they're reading.
+
+**Was my move wrong, or did I miss something better?** That's the first question anyone has, and the panel left it implicit — a "Good move" badge sat above "your winning chances dropped by 11 percentage points" and four cards headed "What it missed", which reads as a contradiction until you've read all of it. `moveFraming()` in `src/lib/format.ts` now states it in one line above everything else. It's a plain map from the classification the engine already assigned, deliberately not generated prose, so it can never disagree with the badge beside it.
+
+**The engine's line was unreadable.** `Nd7 Qxd5 a6 Nc3 c6` looks like handing over a pawn for nothing; the point is that c6 then hits the queen. `lineWalkthrough` annotates the line a move at a time, in the FIRST layer next to the board, because "why would I allow that?" is a question people have while looking at the position.
+
+- Every step's move is checked verbatim against the engine's own line, in order from the start. Any mismatch **discards the whole walkthrough** rather than patching it — a partly-invented line presented as the engine's recommendation is far worse than plain notation.
+- The cap is six moves, not four. The move that pays for a concession is often the fifth, and cutting at four shows a player a sacrifice and stops right before the justification.
+- **The prompt's own example originally skipped a move**, teaching precisely the behaviour the validator rejects. If you edit that example, keep it gapless.
+
+**The model was guessing at deep lines.** It annotated c6 as "shores up the center, ignoring the queen for now" when c6 attacks the White queen. `src/server/explain/pv-facts.ts` plays the line out and hands the model verified facts per move — what it captures, whether it checks, what it now attacks, whether it lands undefended. Same class of fact as the concept detectors: computed, never asserted. With those, c6 came back as "hits the queen on d5, forcing it to move again."
+
+Also fixed, and worth understanding before touching `findRelativePin`: it reported *"the d5 pawn can't move without losing the Black queen on d8"* when d8 was defended by the king on e8 and the pinner was also a queen — Qxd8+ Kxd8 is queens coming off, not a loss. A relative pin now requires that exposing the shielded piece actually **wins material** rather than trading (`exposureCostsMaterial`), and the wording distinguishes three cases, because "can't move" is false for two of them: pinned against the king (genuinely immobile), a pawn pinned along a file (can still push — only diagonal captures leave the line), and everything else (can move, and pays).
+
+### The wait is now legible
+
+Submitting a reflection runs a Stockfish evaluation and then a Claude call — often over ten seconds behind a button that just said "Revealing…". The reflect route now streams **newline-delimited JSON** stage events (`checking` → `explaining` → `saving` → `done`) as it reaches them, and the form shows a staged progress bar.
+
+- Everything that can fail fast (validation, ownership, move legality, already-reviewed) still returns a normal JSON error with a status code. Past that point the response is committed to 200, so **later failures arrive as an error *event*, not a status** — `readRevealStream` in `src/lib/reveal-stream.ts` has to handle that or a failed reveal looks like a success with a missing verdict.
+- Stage labels are ground truth from the server; only the movement between two announcements is estimated. Each stage eases toward a ceiling short of 100, so the bar can never sit at "done" while work is still running.
+- `toClientView` is still the only serializer — streaming changed how the verdict reaches the client, not what the client may see.
+- Verified with a temporary public route that Next 16 + Turbopack flushes each event as it's enqueued rather than buffering the response whole.
+
+---
+
+## 11. Billing — Subscriptions and the Usage Meter
+
+Free accounts may analyze **5 games per calendar month (UTC)**; **Pro is $8/month for 30**. Payment is Stripe
+Billing via **Stripe-hosted Checkout**, with the **Customer Portal** for changing a card or cancelling — so
+this app renders no card field, holds no card data, and needs no publishable key.
+
+### What is metered, and why it's analysis
+
+Analysis is a depth-10 scan of every position plus depth-16 multi-PV on each key moment, then a Claude call per
+reflection. Importing is a PGN parse. **Chess.com sync also runs automatically on every dashboard mount** and
+pulls up to 15 games unasked (`SYNC_LIMIT` in `src/app/api/sync/route.ts`), so metering imports would drain an
+allowance for simply opening the app. Import and sync are therefore free and unlimited.
+
+### Usage is derived, never counted
+
+There is no counter column and no reset job. Usage is `COUNT(*) FROM Game WHERE userId = ? AND
+analysisChargedAt >= <start of this UTC month>`. Nothing can drift, and the 1st of the month needs no cron.
+
+### The one thing not to "simplify": `chargeAnalysis`
+
+`src/server/billing/quota.ts` claims a slot with a **single raw `UPDATE` whose `WHERE` clause contains the
+count**. This looks like something a `$transaction` with a `count()` then an `update()` would express more
+readably. It is not equivalent, and the readable version is broken:
+
+> The dashboard's "Analyze all" fires `Promise.all` of N parallel POSTs. Measured on this codebase: with a
+> read-then-write, **10 simultaneous claims against a limit of 5 all succeeded — a 100% overshoot.** Prisma
+> does not serialize those the way you'd hope. Folding the count into the UPDATE means SQLite evaluates it
+> while holding the write lock for that one statement, and exactly as many succeed as there was room for.
+
+`src/server/billing/quota.test.ts` has a test that fires `limit + 5` concurrent claims and asserts exactly
+`limit` are granted. **If you rewrite `chargeAnalysis`, that test is the one that matters** — and it was
+confirmed to genuinely fail against a naive implementation, so it isn't decorative.
+
+The same statement is why re-analysis is free (`analysisChargedAt IS NULL`), and the analyze route's `.catch()`
+calls `refundAnalysis` so a crashed engine run isn't billed.
+
+### Stripe API version traps (both cost real time)
+
+The SDK pins `2026-07-29.dahlia`:
+
+1. **`Subscription.current_period_end` does not exist.** It's `subscription.items.data[].current_period_end`.
+   Confirmed live: a real test-mode subscription returned `undefined` for the top-level field. Reading it would
+   store `new Date(undefined * 1000)` — an Invalid Date, i.e. a plan that expired in 1970. `periodEndFrom()` in
+   `src/server/billing/sync.ts` takes the latest across items.
+2. **`Invoice.subscription` does not exist.** It's `invoice.parent.subscription_details.subscription`.
+   `subscriptionIdFromInvoice()` in `src/server/billing/webhook-events.ts` checks that first and the legacy
+   field second.
+
+### Access rule
+
+`planForStatus()` in `src/lib/plans.ts` grants Pro for `active`, `trialing` and **`past_due`** — `past_due`
+means Stripe is still retrying the card, and cutting access at the first decline punishes someone for an
+expiring card. Per Stripe's guidance, revoke on `canceled` and `unpaid`, by which point payment has already
+been retried to exhaustion. Anything unrecognised (including a status Stripe adds later) **fails closed to
+Free**.
+
+### The webhook
+
+`/api/stripe/webhook` — four things are load-bearing:
+
+- **It's in `PUBLIC_PREFIXES`.** Stripe carries no Supabase cookie. The signature check authenticates it instead.
+- **Raw body via `req.text()`**, not the `req.json().catch(...)` idiom used everywhere else — verification
+  hashes the exact bytes, and re-serializing fails every time.
+- **A bad signature is 400, never 500.** Stripe retries 5xx for three days.
+- **Events are claimed by inserting `StripeEvent`** before any work; a unique collision means "already
+  handled". On a handler failure the row is deleted again, so a transient error isn't permanently deduplicated
+  away.
+
+It **re-fetches** the subscription by id rather than trusting the event payload, which makes ordering
+irrelevant — a late `updated` can't resurrect a cancelled subscription.
+
+### Client-side: responses must be read
+
+`dashboard-view.tsx`'s `startAnalysis` and `game-review.tsx`'s used to fire requests and **discard every
+response status**, flipping cards to "ANALYZING" optimistically. That was harmless while analysis was
+unlimited; with a paywall it made refusals invisible and the UI assert something untrue. Both now inspect each
+response and only advance the games that actually started. **Don't reintroduce the optimistic version.**
+
+### Where upgrading is surfaced, and how hard it pushes
+
+Three surfaces, deliberately escalating rather than uniformly loud — a permanent hard sell inside a tool built
+for quiet thinking would fight the whole "old chess book" design language:
+
+| Surface | Behaviour |
+|---|---|
+| `PlanBadge` (header, `layout.tsx`) | Always visible. Free accounts see `Free · N left` linking to `/billing`; it turns oxblood at zero. Subscribers get a plain `Pro` chip with **no number and no link** — a paying customer shouldn't be shown a running meter of their allowance. |
+| `UpgradePrompt` (dashboard) | Four states off one number: **calm** (3+ left) is a status line with a small outline button; **nudge** (1–2 left) and **spent** (0) become a real pitch with the large CTA; **pro** is the meter alone, no upsell. |
+| `PlanComparison` (`/billing`) | Free vs Pro side by side, Pro carrying tint + ring + "Recommended" + the only filled button. |
+
+Rules that were applied and are worth keeping:
+
+- **Every number is derived.** The remaining count, reset date, `6×` multiplier and `27¢`-a-game figure all come
+  from `PLANS` and the real quota, so the marketing copy cannot drift from what's charged and enforced. The
+  per-game framing is `formatPerGamePrice()`.
+- **No invented social proof.** No user counts, testimonials, countdowns or fake urgency. The scarcity shown
+  ("2 games left") is real and server-enforced, which is the only reason it deserves attention. One fabricated
+  number here would undermine every honest one.
+- **One CTA per page.** `/billing`'s top card deliberately has *no* upgrade button for free users; the single
+  call to action lives in the comparison below.
+- **Risk reversal is factual.** "Cancel any time — you keep Pro till the period ends" was checked against the
+  live portal configuration, which has `subscription_cancel.mode = at_period_end`.
+- CTA styling comes from `src/lib/cta.ts` (`PRIMARY_CTA_CLASS`), shared with the landing hero so the most
+  important button looks like one thing product-wide. It's built on `--primary`, **not** a hand-rolled
+  gradient, so it keeps the contrast guarantees `src/lib/contrast.test.ts` enforces.
+- `Card` sets `overflow-hidden`; a negatively-offset badge on it gets clipped. Put such tags in normal flow.
+
+### Stripe CLI and the local webhook
+
+The CLI is installed (`brew`-managed, `stripe` on PATH). It never needed an interactive `stripe login` — every
+command takes `--api-key`, which is how the signing secret was fetched:
+
+```bash
+stripe listen --api-key "$STRIPE_SECRET_KEY" --print-secret
+stripe listen --api-key "$STRIPE_SECRET_KEY" --forward-to localhost:3000/api/stripe/webhook
+```
+
+Verified end to end with `stripe trigger customer.subscription.created`: real events delivered, all `200`. The
+`[billing] Subscription … has no matching local user — ignoring` line that appears is **correct** — `stripe
+trigger` invents a customer with no local account, and that's the graceful-ignore path doing its job.
+
+The **Customer Portal needed no activation in test mode** — Stripe auto-creates a default configuration
+(`subscription_cancel` at period end, payment-method update, invoice history all on). Live mode may differ.
+
+### The Supabase mirror (reporting only)
+
+Subscription state is **also** written to a `public.subscriptions` table in Supabase, so billing can be queried
+from the Supabase dashboard. Read the direction of travel carefully, because it's the only thing that keeps this
+safe:
+
+> Stripe is the source of truth → the local Prisma `User` row is the application's copy → the Supabase table is
+> a copy of *that*. Nothing reads it back. If it disagrees with the app, **the table is wrong.**
+
+This is deliberately a second copy of the same truth, which can drift; that was an accepted trade for dashboard
+queryability. Three properties make it tolerable, and none should be removed:
+
+- **It cannot fail a webhook.** `mirrorSubscription()` swallows every error and is bounded to 3s. If
+  provisioning depended on Supabase being reachable, a Supabase outage would silently stop paying customers
+  getting access — much worse than a stale reporting table. Verified live: with the key unset, `applySubscription`
+  runs the mirror, logs one warning, and completes normally.
+- **It hangs off the single write path.** `applySubscription()` in `sync.ts` is the only place subscription state
+  is written, so the mirror is attached there rather than per webhook event type.
+- **Drift is repairable.** `npx tsx scripts/reconcile-supabase-subscriptions.ts` rebuilds every row from the
+  local database. Upsert on `app_user_id`, so re-running is a no-op. Run it after adding the key, and after any
+  incident.
+
+**RLS is enabled and is not optional.** The anon key ships to every browser by design; without the
+`auth.uid() = supabase_user_id` select policy it would read every customer's billing state. There are no
+insert/update/delete policies — only the service role writes, and it bypasses RLS.
+
+**This is live and verified.** The table exists on project `jofrvoreujywlsvwallm` and
+`SUPABASE_SERVICE_ROLE_KEY` is set in `.env`. Confirmed end to end: the reconcile script wrote the existing
+subscriber (`Wrote 1/1`), the row read back matching local state field for field, and then a genuine
+`customer.subscription.updated` from Stripe advanced `synced_at` through the webhook — so the mirror maintains
+itself rather than needing the script.
+
+Re-creating it elsewhere is two manual steps, because there's no Supabase CLI here and DDL can't be run through
+the REST API at all (not even with the service-role key): paste
+`supabase/migrations/20260818210000_subscriptions_mirror.sql` into the Supabase SQL editor, then set
+`SUPABASE_SERVICE_ROLE_KEY` (server-only — **never** `NEXT_PUBLIC_`, since that key ignores every RLS policy)
+and restart. Unset, mirroring is simply off and nothing else changes.
+
+### Setup
+
+Env: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID_PRO`, `NEXT_PUBLIC_APP_URL` (all documented
+in `.env.example`). The first two must never carry a `NEXT_PUBLIC_` prefix. Env is read at process start —
+restart the server.
+
+The test-mode Product/Price already exist in the connected Stripe account:
+`prod_V6ClsNsHCWwMg2` / `price_1U60LxLtX1sQHTj00mLw8UPw` ($8.00 USD monthly).
+
+### Managed Payments requires a product tax code
+
+This account has **Managed Payments enabled by default**, which makes `tax_code` mandatory on any Product sold
+through Checkout. Without it, `checkout.sessions.create` fails with:
+
+> `Invalid line_items[0]: the product tax code is missing.`
+
+The Pro product is set to **`txcd_10103000` — "Software as a service (SaaS) - personal use"**, which fits a
+browser-delivered tool sold to individual players. **If you ever sell to clubs or businesses, or create a
+second product, revisit this** — `txcd_10103001` is the business-use equivalent, and a new product with no tax
+code will fail checkout the same way. The alternative escape hatch is passing
+`managed_payments: { enabled: false }` on the session, which turns off Stripe handling tax for you; setting the
+tax code is the better answer.
+
+Because a misconfiguration like this surfaces as a dead button, `checkout` and `portal` now append Stripe's own
+message to their 502 body **outside production** (`stripeErrorMessage()`), while real users still see the plain
+sentence. The first version swallowed it, which is what made this take a debugging round trip.
+
+All four env vars are set for test mode. **`stripe listen` has to be running for local webhooks** — see above.

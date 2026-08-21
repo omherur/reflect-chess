@@ -9,6 +9,8 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { LogoMark } from "@/components/brand/logo";
 import { getCurrentUser } from "@/server/auth";
 import { isAdminUser } from "@/server/admin-auth";
+import { getQuota, toQuotaView } from "@/server/billing/quota";
+import { PlanBadge } from "@/components/billing/plan-badge";
 import "./globals.css";
 
 // Body text: a clean, neutral sans-serif.
@@ -41,6 +43,10 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const user = await getCurrentUser();
+  // One indexed COUNT, and only for signed-in visitors. Worth it: the chip is
+  // what stops "which plan am I on" from being a question you have to go
+  // looking for an answer to.
+  const quota = user ? toQuotaView(await getQuota(user)) : null;
 
   return (
     <html
@@ -70,6 +76,9 @@ export default async function RootLayout({
                     <Link href="/performance" className="hover:text-foreground">
                       Performance
                     </Link>
+                    <Link href="/billing" className="hover:text-foreground">
+                      Billing
+                    </Link>
                     {/* Only rendered for the allowlist — /admin 404s for
                         everyone else, so advertising it would be noise. */}
                     {isAdminUser(user) && (
@@ -79,6 +88,7 @@ export default async function RootLayout({
                     )}
                   </nav>
                 )}
+                {quota && <PlanBadge quota={quota} />}
                 <ThemeToggle />
                 {user ? (
                   <UserMenu name={user.name} />

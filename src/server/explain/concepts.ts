@@ -1,5 +1,7 @@
 import { Chess, type Square, type PieceSymbol } from "chess.js";
 import type { ConceptHighlight, StructuredExplanation } from "@/lib/types";
+import { firstSentence } from "@/lib/explanation-summary";
+import { PIECE_VALUE, winsMaterial } from "./exchange";
 
 /**
  * Lightweight, deterministic concept detection from board state — no
@@ -12,18 +14,25 @@ import type { ConceptHighlight, StructuredExplanation } from "@/lib/types";
  * bug once found here (a "pin" claimed across mismatched piece colors with
  * a pawn merely blocking the line of sight — not a pin by any definition).
  *
+ * Being geometrically real is necessary but NOT sufficient. A tactic whose
+ * targets are all adequately defended wins nothing, and reporting it as a
+ * finding actively wastes the player's attention — the thing they most need
+ * from a review is to know which few facts actually mattered. So every
+ * material-winning detector below is additionally gated on a static
+ * exchange evaluation (see exchange.ts): the tactic has to be worth at
+ * least a pawn once both sides have finished trading on the square.
+ *
  * Detection runs on the position AFTER the move in question. Each finding
  * carries the squares involved, so the UI can highlight them on the board.
  */
 
-const PIECE_VALUE: Record<PieceSymbol, number> = {
-  p: 1,
-  n: 3,
-  b: 3,
-  r: 5,
-  q: 9,
-  k: 0,
-};
+/**
+ * The most concepts ever reported for one moment. Past three, a reveal
+ * turns into a list to read rather than a lesson to absorb — and the ones
+ * beyond third place are, by the ordering in findConcepts, the least
+ * material anyway.
+ */
+const MAX_CONCEPTS = 3;
 
 type Side = "w" | "b";
 
@@ -38,8 +47,17 @@ function rankOf(sq: Square): number {
   return parseInt(sq[1], 10);
 }
 
-/** Squares attacked by the side to move that hold an undefended enemy piece. */
-function hangingPieceTargets(chess: Chess): { square: Square; value: number }[] {
+/**
+ * Undefended enemy pieces the side to move can actually win. "Undefended"
+ * alone isn't enough: the attacking piece may itself be pinned, in which
+ * case the capture is illegal and there was never anything to take — hence
+ * the winsMaterial() gate, which enumerates legal captures rather than
+ * geometric attacks.
+ */
+function hangingPieceTargets(
+  chess: Chess,
+  requireMaterial: boolean
+): { square: Square; value: number }[] {
   const attacker = chess.turn();
   const defender = opposite(attacker);
   const found: { square: Square; value: number }[] = [];
@@ -51,16 +69,30 @@ function hangingPieceTargets(chess: Chess): { square: Square; value: number }[] 
       const attackers = chess.attackers(piece.square, attacker);
       if (attackers.length === 0) continue;
       const defenders = chess.attackers(piece.square, defender);
-      if (defenders.length === 0) {
-        found.push({ square: piece.square, value: PIECE_VALUE[piece.type] });
-      }
+      if (defenders.length > 0) continue;
+      if (requireMaterial && !winsMaterial(chess, piece.square)) continue;
+      found.push({ square: piece.square, value: PIECE_VALUE[piece.type] });
     }
   }
   return found.sort((a, b) => b.value - a.value);
 }
 
-/** Detect a fork: one piece attacking 2+ valuable enemy pieces. Returns the attacker + targets. */
-function findFork(chess: Chess): { attacker: Square; targets: Square[] } | null {
+/**
+ * Detect a fork: one piece attacking 2+ valuable enemy pieces, where the
+ * fork actually costs the defender something.
+ *
+ * The material gate is the whole point of this detector being trustworthy.
+ * A knight hitting two rooks that are each defended still wins a rook for a
+ * knight; a knight hitting two defended knights wins nothing, and a queen
+ * "forking" two defended pawns loses material if it takes either one. Only
+ * the first is a finding. `targets` is narrowed to the ones actually
+ * winnable, so the note names what's genuinely at stake instead of listing
+ * every piece the fork happens to touch.
+ */
+function findFork(
+  chess: Chess,
+  requireMaterial: boolean
+): { attacker: Square; targets: Square[] } | null {
   const attackerColor = chess.turn();
   const defender = opposite(attackerColor);
   const board = chess.board();
@@ -78,7 +110,14 @@ function findFork(chess: Chess): { attacker: Square; targets: Square[] } | null 
           }
         }
       }
-      if (targets.length >= 2) return { attacker: piece.square, targets };
+      if (targets.length < 2) continue;
+      // Two targets are what makes it a fork — the defender can't save both
+      // — but at least one of them has to be worth taking, or nothing is
+      // being threatened and there's nothing to tell the player.
+      if (!requireMaterial) return { attacker: piece.square, targets };
+      const winnable = targets.filter((sq) => winsMaterial(chess, sq));
+      if (winnable.length === 0) continue;
+      return { attacker: piece.square, targets: winnable.length >= 2 ? winnable : targets };
     }
   }
   return null;
@@ -160,7 +199,10 @@ function findKing(chess: Chess, color: Side): Square | null {
  * checked before, which is exactly how a mixed-color, pawn-blocked non-pin
  * could get flagged as a pin.
  */
-function findPin(chess: Chess): { pinner: Square; pinned: Square; king: Square } | null {
+function findPin(
+  chess: Chess,
+  requireMaterial: boolean
+): { pinner: Square; pinned: Square; behind: Square } | null {
   const attacker = chess.turn();
   const defender = opposite(attacker);
   const kingSquare = findKing(chess, defender);
@@ -184,11 +226,127 @@ function findPin(chess: Chess): { pinner: Square; pinned: Square; king: Square }
 
       const { sq: pinnedSq, occupant } = occupied[0];
       if (!occupant || occupant.color !== defender) continue; // must be the DEFENDER's piece, not the attacker's own
+      if (requireMaterial && !pinCostsMaterial(chess, pinnedSq, attacker, defender)) continue;
 
-      return { pinner: piece.square, pinned: pinnedSq, king: kingSquare };
+      return { pinner: piece.square, pinned: pinnedSq, behind: kingSquare };
+    }
+  }
+  return findRelativePin(chess, requireMaterial);
+}
+
+/**
+ * A relative pin: the same shape as an absolute pin, except the piece
+ * being shielded is merely more valuable rather than the king. A knight on
+ * f6 with the queen behind it on d8 can technically move; it just loses the
+ * queen if it does.
+ *
+ * This was missing entirely, and its absence had a cost beyond the missing
+ * finding. Bg5 pinning a knight to the queen is one of the most common
+ * shapes in chess — a player in the dev database described their own move
+ * as exactly that — and because no detector could confirm it, the model
+ * writing the same true sentence counted as an unverified tactical claim
+ * and had its text replaced with the generic template. The check meant to
+ * stop invented tactics was suppressing a real one.
+ */
+function findRelativePin(
+  chess: Chess,
+  requireMaterial: boolean
+): { pinner: Square; pinned: Square; behind: Square } | null {
+  const attacker = chess.turn();
+  const defender = opposite(attacker);
+  const board = chess.board();
+
+  for (const row of board) {
+    for (const piece of row) {
+      if (!piece || piece.color !== attacker) continue;
+      if (piece.type !== "b" && piece.type !== "r" && piece.type !== "q") continue;
+
+      for (const row2 of board) {
+        for (const front of row2) {
+          if (!front || front.color !== defender || front.type === "k") continue;
+          if (!isAligned(piece.square, front.square, piece.type)) continue;
+          if (!chess.attackers(front.square, attacker).includes(piece.square)) continue;
+
+          const beyond = firstOccupiedBeyond(chess, piece.square, front.square);
+          if (!beyond) continue;
+          const shielded = chess.get(beyond);
+          if (!shielded || shielded.color !== defender) continue;
+
+          // Strictly more valuable, or the shape is a skewer (handled
+          // there) rather than a pin. The king is excluded because that's
+          // the absolute pin the caller already looked for.
+          if (shielded.type === "k") continue;
+          if (PIECE_VALUE[shielded.type] <= PIECE_VALUE[front.type]) continue;
+
+          // Exposing the shielded piece has to actually COST something.
+          // A pawn "pinning" a queen to a king is a pin; a queen lined up
+          // on a defended queen is a trade offer, and calling it a pin
+          // teaches the player to fear an even exchange. This was reported
+          // for real: "the d5 pawn can't move without losing the queen on
+          // d8" when d8 was defended by the king on e8, so Qxd8+ Kxd8 is
+          // simply queens off.
+          if (requireMaterial && !exposureCostsMaterial(chess, beyond, piece, defender, front.square)) {
+            continue;
+          }
+          if (requireMaterial && !pinCostsMaterial(chess, front.square, attacker, defender)) {
+            continue;
+          }
+          return { pinner: piece.square, pinned: front.square, behind: beyond };
+        }
+      }
     }
   }
   return null;
+}
+
+/**
+ * Whether capturing the shielded piece would win material rather than
+ * merely trade. Undefended means it's simply won; otherwise the attacker
+ * has to be worth strictly less than what it takes, or the "threat" is an
+ * even exchange the player has no reason to avoid.
+ *
+ * The pinned piece in front is excluded from the defence count, since it's
+ * the piece that has to move for any of this to happen.
+ */
+function exposureCostsMaterial(
+  chess: Chess,
+  shieldedSquare: Square,
+  pinner: { type: PieceSymbol },
+  defender: Side,
+  pinnedSquare: Square
+): boolean {
+  const shielded = chess.get(shieldedSquare);
+  if (!shielded) return false;
+  const defenders = chess.attackers(shieldedSquare, defender).filter((sq) => sq !== pinnedSquare);
+  if (defenders.length === 0) return true;
+  return PIECE_VALUE[shielded.type] > PIECE_VALUE[pinner.type];
+}
+
+/**
+ * Whether a real pin is one the player needs to hear about.
+ *
+ * Every absolute pin is geometrically real, but most of them cost nothing:
+ * a knight pinned to its king while defended twice and attacked once is
+ * simply a piece that can't move for a while, not a piece that's going to
+ * be lost. Two ways a pin becomes material, and it only takes one:
+ *
+ *  - it can be cashed in right now (a profitable capture on the square), or
+ *  - the attacker can pile on and win it. Because a pinned piece cannot
+ *    step out of the line, attackers only have to match defenders rather
+ *    than outnumber them — the defender can never break the standoff by
+ *    moving the piece to safety, which is exactly what the pin takes away.
+ *
+ * A pin that immobilizes a piece which is defending something else is a
+ * third, genuinely useful case this deliberately does NOT try to detect —
+ * the material it wins shows up on the OTHER square, where the hanging /
+ * fork detectors will find it and describe it more concretely than "there
+ * is a pin somewhere" ever could.
+ */
+function pinCostsMaterial(chess: Chess, pinned: Square, attacker: Side, defender: Side): boolean {
+  if (winsMaterial(chess, pinned)) return true;
+  const attackers = chess.attackers(pinned, attacker).length;
+  const defenders = chess.attackers(pinned, defender).length;
+  return attackers >= defenders;
 }
 
 /**
@@ -204,7 +362,10 @@ function findPin(chess: Chess): { pinner: Square; pinned: Square; king: Square }
  * satisfy "front piece is worth at least as much," making every pin also
  * get double-labeled as a skewer of the exact same two squares.
  */
-function findSkewer(chess: Chess): { attacker: Square; front: Square; behind: Square } | null {
+function findSkewer(
+  chess: Chess,
+  requireMaterial: boolean
+): { attacker: Square; front: Square; behind: Square } | null {
   const attackerColor = chess.turn();
   const defenderColor = opposite(attackerColor);
   const board = chess.board();
@@ -229,6 +390,41 @@ function findSkewer(chess: Chess): { attacker: Square; front: Square; behind: Sq
           const frontMustMove =
             front.type === "k" || PIECE_VALUE[front.type] >= PIECE_VALUE[behindPiece.type];
           if (!frontMustMove) continue;
+
+          // The front piece has to be under a threat it can't just ignore.
+          // Relative value alone said a queen "attacking" a defended pawn
+          // forces that pawn to move, which is backwards — the queen is the
+          // piece that daren't take. Real dev-DB data was full of exactly
+          // this: "the White queen on h5 attacks the Black pawn on g5,
+          // which must move and expose the Black pawn on d5 behind it".
+          if (requireMaterial && front.type !== "k" && !winsMaterial(chess, front.square)) continue;
+
+          // And what's behind has to be worth winning. A skewer that ends
+          // in a pawn isn't a lesson, it's a footnote — every genuine one
+          // wins a piece or better.
+          if (requireMaterial && PIECE_VALUE[behindPiece.type] < PIECE_VALUE.n) continue;
+
+          // The piece behind has to be worth taking once the front one
+          // steps aside. If it's defended and worth no more than the
+          // skewering piece, the "skewer" ends in an even trade at best —
+          // true geometry, no consequence, nothing to report.
+          //
+          // The front piece is excluded from that defence count on purpose:
+          // it's the piece being forced to move, so whatever it currently
+          // covers it may well stop covering. Counting it would suppress the
+          // most common skewer shape there is — a queen in front of a rook
+          // on the same rank, where the queen "defends" the rook right up
+          // until the moment it has to run.
+          const defenders = chess
+            .attackers(beyond, defenderColor)
+            .filter((sq) => sq !== front.square);
+          if (
+            requireMaterial &&
+            defenders.length > 0 &&
+            PIECE_VALUE[behindPiece.type] <= PIECE_VALUE[piece.type]
+          ) {
+            continue;
+          }
 
           return { attacker: piece.square, front: front.square, behind: beyond };
         }
@@ -291,6 +487,23 @@ const PIECE_NAME: Record<PieceSymbol, string> = {
   k: "king",
 };
 
+/**
+ * How to describe what the pin actually costs, which differs by shape and
+ * matters because the wrong phrasing states something false:
+ *
+ *  - against the king, the pinned piece genuinely cannot move at all;
+ *  - a pawn pinned along a FILE can still push — only its diagonal
+ *    captures leave the line — so "can't move" would be wrong;
+ *  - otherwise the piece may move and pay for it.
+ */
+function pinConsequence(chess: Chess, pin: { pinner: Square; pinned: Square; behind: Square }): string {
+  if (chess.get(pin.behind)?.type === "k") return "can't move without exposing";
+  const pinnedPiece = chess.get(pin.pinned);
+  const onSameFile = fileOf(pin.pinner) === fileOf(pin.pinned);
+  if (pinnedPiece?.type === "p" && onSameFile) return "can't capture away from the file without losing";
+  return "can't move without losing";
+}
+
 /** e.g. "White bishop" for the piece actually sitting on `square`. */
 function pieceLabel(chess: Chess, square: Square): string {
   const piece = chess.get(square);
@@ -306,12 +519,23 @@ function pieceLabel(chess: Chess, square: Square): string {
  * label) so it can be used as a concrete, verified fact — both for the
  * deterministic template and as grounding input to the explanation model.
  * `fenAfter` is the FEN after the move was played; `moverColor` is who just moved.
+ *
+ * `requireMaterial` separates two different questions that were previously
+ * answered by one list. Displaying a finding asks "is this worth the
+ * player's attention", which is why the material gates exist. Checking the
+ * model's prose asks only "is this true", and holding it to the stricter
+ * bar meant a correct sentence about a real-but-cheap tactic was treated
+ * as an invented one. Pass false for the second question only.
  */
-export function findConcepts(fenAfter: string, moverColor: Side): ConceptHighlight[] {
+export function findConcepts(
+  fenAfter: string,
+  moverColor: Side,
+  { requireMaterial = true }: { requireMaterial?: boolean } = {}
+): ConceptHighlight[] {
   const chess = new Chess(fenAfter);
   const highlights: ConceptHighlight[] = [];
 
-  const hanging = hangingPieceTargets(chess);
+  const hanging = hangingPieceTargets(chess, requireMaterial);
   if (hanging.length > 0) {
     const [top, second] = hanging;
     const topLabel = pieceLabel(chess, top.square);
@@ -325,7 +549,7 @@ export function findConcepts(fenAfter: string, moverColor: Side): ConceptHighlig
     });
   }
 
-  const fork = findFork(chess);
+  const fork = findFork(chess, requireMaterial);
   if (fork) {
     const attackerLabel = pieceLabel(chess, fork.attacker);
     const targets = fork.targets
@@ -339,19 +563,19 @@ export function findConcepts(fenAfter: string, moverColor: Side): ConceptHighlig
     });
   }
 
-  const pin = findPin(chess);
+  const pin = findPin(chess, requireMaterial);
   if (pin) {
     const pinnedLabel = pieceLabel(chess, pin.pinned);
     const pinnerLabel = pieceLabel(chess, pin.pinner);
-    const kingLabel = pieceLabel(chess, pin.king);
+    const behindLabel = pieceLabel(chess, pin.behind);
     highlights.push({
       concept: "pin",
-      note: `${pinnedLabel} on ${pin.pinned} is pinned by the ${pinnerLabel} on ${pin.pinner} — it can't move without exposing the ${kingLabel} on ${pin.king}`,
-      squares: [pin.pinner, pin.king, pin.pinned],
+      note: `${pinnedLabel} on ${pin.pinned} is pinned by the ${pinnerLabel} on ${pin.pinner} — it ${pinConsequence(chess, pin)} the ${behindLabel} on ${pin.behind}`,
+      squares: [pin.pinner, pin.behind, pin.pinned],
     });
   }
 
-  const skewer = findSkewer(chess);
+  const skewer = findSkewer(chess, requireMaterial);
   if (skewer) {
     const attackerLabel = pieceLabel(chess, skewer.attacker);
     const frontLabel = pieceLabel(chess, skewer.front);
@@ -385,7 +609,10 @@ export function findConcepts(fenAfter: string, moverColor: Side): ConceptHighlig
     });
   }
 
-  return highlights;
+  // Push order above is roughly descending consequence — lost material
+  // first, then tactics that win it, then king-safety observations — so
+  // taking the first few keeps the ones that matter most.
+  return highlights.slice(0, MAX_CONCEPTS);
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +697,10 @@ export function computeApproximate(classification: string, concepts: string[]): 
 // ---------------------------------------------------------------------------
 
 const TACTICAL_TERMS: { concept: string; pattern: RegExp }[] = [
-  { concept: "pin", pattern: /\bpinn(?:ed|ing)?\b|\bpin\b/i },
+  // "pins" was missing from this alternation, so "Bg5 pins the knight"
+  // passed the check unexamined while "a pin on the knight" did not — the
+  // same claim, caught or not depending on the verb form.
+  { concept: "pin", pattern: /\bpin(?:s|ned|ning)?\b/i },
   { concept: "fork", pattern: /\bfork(?:s|ed|ing)?\b/i },
   { concept: "skewer", pattern: /\bskewer(?:s|ed|ing)?\b/i },
   { concept: "discovered attack", pattern: /\bdiscover(?:ed|y)? (?:attack|check)\b/i },
@@ -479,17 +709,161 @@ const TACTICAL_TERMS: { concept: string; pattern: RegExp }[] = [
   { concept: "king exposure", pattern: /\bking exposure\b|\bexposed king\b/i },
 ];
 
+/**
+ * Addressable text fields of an explanation. The summary's three lines are
+ * addressed with a dotted path because they're nested one level down — and
+ * they have to be addressable at all, since a summary is the layer most
+ * players read and an unverified tactic asserted there would reach more
+ * people than the same claim buried in the detail.
+ */
+export type ExplanationField =
+  | "whatYourMoveDid"
+  | "whatItMissed"
+  | "whyBestIsBetter"
+  | "remember"
+  | "replayNote"
+  | "summary.headline"
+  | "summary.betterMove"
+  | "summary.takeaway";
+
+/**
+ * Tactical terms in `text` that aren't in the verified vocabulary. Used for
+ * text that isn't a field of StructuredExplanation — the engine-line
+ * walkthrough notes, which are discarded wholesale rather than patched,
+ * since half an annotated line is worse than plain notation.
+ */
+export function findUngroundedTerms(text: string, allowed: string[]): string[] {
+  const allowedSet = new Set(allowed.map((c) => c.toLowerCase()));
+  return TACTICAL_TERMS.filter(
+    ({ concept, pattern }) => pattern.test(text) && !allowedSet.has(concept)
+  ).map(({ concept }) => concept);
+}
+
 export interface GroundingViolation {
-  field: keyof StructuredExplanation;
+  field: ExplanationField;
   concept: string;
 }
 
-const NARRATIVE_FIELDS: (keyof StructuredExplanation)[] = [
+const NARRATIVE_FIELDS = [
   "whatYourMoveDid",
   "whatItMissed",
   "whyBestIsBetter",
   "remember",
-];
+] as const;
+
+const SUMMARY_FIELDS = ["headline", "betterMove", "takeaway"] as const;
+
+type SummaryField = Extract<ExplanationField, `summary.${string}`>;
+/** The flat text fields — everything addressable that isn't a summary line. */
+type DeepField = Exclude<ExplanationField, SummaryField>;
+
+function isSummaryField(field: ExplanationField): field is SummaryField {
+  return field.startsWith("summary.");
+}
+
+/**
+ * Every concept that is genuinely verifiable for this moment — which is a
+ * different question from which concepts are worth *showing*.
+ *
+ * `filterRelevantConcepts` decides what to display, and it is deliberately
+ * strict; using that same narrowed list to decide what the model may SAY
+ * conflates the two. A real case from the dev database: after Bg5 in
+ * `r1bqk2r/pppp1ppp/1bn2n2/4p3/2BPP3/2P2N2/PP3PPP/RNBQK2R w KQkq - 1 6`,
+ * a hanging piece is detected, the relevance filter drops it, and the
+ * allow-list arrives empty — so the model's correct, concrete prose about
+ * the pawn it could have taken was replaced with "It missed a stronger
+ * continuation the engine found in this position." Three of the four
+ * explanation fields degraded that way at once.
+ *
+ * So the vocabulary is drawn from the board rather than the display set:
+ * the unfiltered concepts on the position after the move, plus those in
+ * the engine's principal variation, which the prompt explicitly asks the
+ * model to narrate.
+ *
+ * The guarantee this protects is unchanged in kind: every term is still
+ * one a deterministic detector verified on a real position, never one the
+ * model asserted on its own. It is weaker in degree — a tactic verified
+ * several plies into the line could be cited as though it were on the
+ * board now — which is why the PV window is short.
+ */
+export function verifiedConceptVocabulary(
+  fenBefore: string,
+  playedUci: string,
+  principalVariationSan: string[],
+  maxPvPlies = 6
+): string[] {
+  const names = new Set<string>();
+
+  const afterPlayed = new Chess(fenBefore);
+  try {
+    const move = afterPlayed.move({
+      from: playedUci.slice(0, 2),
+      to: playedUci.slice(2, 4),
+      promotion: playedUci.slice(4, 5) || undefined,
+    });
+    for (const name of conceptsFromBothSides(afterPlayed.fen(), move.color)) names.add(name);
+  } catch {
+    // An unplayable move here means the caller handed us mismatched data;
+    // the PV pass below is still worth running.
+  }
+
+  const line = new Chess(fenBefore);
+  for (const san of principalVariationSan.slice(0, maxPvPlies)) {
+    let move;
+    try {
+      move = line.move(san);
+    } catch {
+      break;
+    }
+    for (const name of conceptsFromBothSides(line.fen(), move.color)) names.add(name);
+  }
+
+  return Array.from(names);
+}
+
+/**
+ * Concept names present for EITHER side in a position.
+ *
+ * The detectors all read threats belonging to the side to move, which for a
+ * position after the player's move means threats against the player —
+ * correct for "what did your move leave hanging", and exactly wrong for
+ * anything the player's own move created. Bg5 pinning a knight is the
+ * player's pin, so it is invisible from that one perspective, which is how
+ * a player's own accurate description of their move ("pinning the knight to
+ * the queen") ended up unverifiable.
+ *
+ * Running the detectors again against the same position with the side to
+ * move flipped — a null move — recovers the other half. This is only used
+ * to decide what the model is ALLOWED TO SAY, never what gets displayed;
+ * the display list stays deliberately one-sided.
+ */
+function conceptsFromBothSides(fen: string, moverColor: Side): string[] {
+  const names = findConcepts(fen, moverColor, { requireMaterial: false }).map((c) => c.concept);
+  const flipped = flipSideToMove(fen);
+  if (!flipped) return names;
+  try {
+    for (const c of findConcepts(flipped, moverColor, { requireMaterial: false })) {
+      names.push(c.concept);
+    }
+  } catch {
+    // A position that is only legal for one side to move (the other side
+    // would be leaving itself in check) — nothing to add from that side.
+  }
+  return names;
+}
+
+/**
+ * The same position with the other side to move. The en-passant square is
+ * cleared because it describes the move that was just played, and it makes
+ * no sense — and may be rejected as illegal — once the turn is inverted.
+ */
+function flipSideToMove(fen: string): string | null {
+  const fields = fen.split(" ");
+  if (fields.length < 4) return null;
+  fields[1] = fields[1] === "w" ? "b" : "w";
+  fields[3] = "-";
+  return fields.join(" ");
+}
 
 /**
  * Scans each narrative field of a generated explanation for named tactical
@@ -508,7 +882,7 @@ export function findGroundingViolations(
   const allSet = new Set([...originalConcepts, ...replayConcepts].map((c) => c.toLowerCase()));
 
   const violations: GroundingViolation[] = [];
-  const check = (field: keyof StructuredExplanation, text: string, allowed: Set<string>) => {
+  const check = (field: ExplanationField, text: string, allowed: Set<string>) => {
     for (const { concept, pattern } of TACTICAL_TERMS) {
       if (pattern.test(text) && !allowed.has(concept)) {
         violations.push({ field, concept });
@@ -517,9 +891,18 @@ export function findGroundingViolations(
   };
 
   for (const field of NARRATIVE_FIELDS) {
-    check(field, explanation[field] as string, originalSet);
+    check(field, explanation[field], originalSet);
   }
   check("replayNote", explanation.replayNote, allSet);
+
+  // The summary describes the original position, same as the four detail
+  // fields, so it's held to the same verified list.
+  const summary = explanation.summary;
+  if (summary) {
+    for (const key of SUMMARY_FIELDS) {
+      check(`summary.${key}`, summary[key] ?? "", originalSet);
+    }
+  }
 
   return violations;
 }
@@ -536,9 +919,52 @@ export function applyGrounding(
   violations: GroundingViolation[]
 ): StructuredExplanation {
   if (violations.length === 0) return explanation;
-  const patched = { ...explanation };
-  for (const { field } of violations) {
-    (patched[field] as string) = fallback[field] as string;
+  const violatingFields = new Set(violations.map((v) => v.field));
+  const patched: StructuredExplanation = { ...explanation };
+
+  for (const field of violatingFields) {
+    if (isSummaryField(field)) {
+      const key = field.slice("summary.".length) as (typeof SUMMARY_FIELDS)[number];
+      if (!patched.summary) continue;
+      const replacement = summaryReplacement(key, explanation, fallback, violatingFields);
+      if (replacement) patched.summary = { ...patched.summary, [key]: replacement };
+      continue;
+    }
+    patched[field] = fallback[field];
   }
   return patched;
 }
+
+/**
+ * What to put in a summary line whose original text named an unverified
+ * tactic.
+ *
+ * The template's equivalent line is always available and always safe, but
+ * it's also the most generic sentence in the system ("gave up a small
+ * amount of your advantage"), and since the summary is the layer nearly
+ * everyone reads, dropping to it costs more than it used to. So the deep
+ * field that says the same thing is tried first: if the model's own
+ * `whatItMissed` passed the grounding check, its first sentence is a far
+ * better headline than the template's, and it's just as verified — it
+ * survived exactly the same test.
+ */
+function summaryReplacement(
+  key: (typeof SUMMARY_FIELDS)[number],
+  explanation: StructuredExplanation,
+  fallback: StructuredExplanation,
+  violatingFields: Set<ExplanationField>
+): string | undefined {
+  const sourceField = SUMMARY_SOURCE_FIELD[key];
+  if (!violatingFields.has(sourceField)) {
+    const source = explanation[sourceField]?.trim();
+    if (source) return firstSentence(source);
+  }
+  return fallback.summary?.[key];
+}
+
+/** The deep field each summary line compresses, used when one needs replacing. */
+const SUMMARY_SOURCE_FIELD: Record<(typeof SUMMARY_FIELDS)[number], DeepField> = {
+  headline: "whatItMissed",
+  betterMove: "whyBestIsBetter",
+  takeaway: "remember",
+};

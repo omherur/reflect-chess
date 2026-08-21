@@ -1,5 +1,10 @@
 import type { StructuredExplanation } from "@/lib/types";
-import { applyGrounding, findGroundingViolations } from "./concepts";
+import {
+  applyGrounding,
+  findGroundingViolations,
+  findUngroundedTerms,
+  verifiedConceptVocabulary,
+} from "./concepts";
 import { recordExplanation } from "./monitor";
 import type { ExplainContext, ExplainInput, ExplanationProvider } from "./types";
 
@@ -44,8 +49,33 @@ export class FallbackExplanationProvider implements ExplanationProvider {
       return fallbackResult;
     }
 
-    const originalConcepts = input.conceptHighlights.map((c) => c.concept);
+    // The allow-list is what the BOARD supports, not what the UI chose to
+    // show. The displayed concepts are a strict subset — see
+    // verifiedConceptVocabulary for the case where using the subset alone
+    // silently gutted three of four fields.
+    const verified = verifiedConceptVocabulary(
+      input.fenBefore,
+      input.originalUci,
+      input.principalVariationSan
+    );
+    const originalConcepts = [...input.conceptHighlights.map((c) => c.concept), ...verified];
     const replayConcepts = input.replayConceptHighlights.map((c) => c.concept);
+    // The walkthrough's moves are already checked against the engine's own
+    // line, so only its prose can go wrong. It's dropped rather than
+    // patched: a partly-rewritten annotated line would read as though the
+    // engine recommended something it didn't.
+    if (primaryResult.lineWalkthrough) {
+      const notes = primaryResult.lineWalkthrough.map((step) => step.note).join(" ");
+      const ungrounded = findUngroundedTerms(notes, originalConcepts);
+      if (ungrounded.length > 0) {
+        console.warn(
+          "[explain] Dropping the engine-line walkthrough — ungrounded term(s):",
+          ungrounded.join(", ")
+        );
+        primaryResult = { ...primaryResult, lineWalkthrough: undefined };
+      }
+    }
+
     const violations = findGroundingViolations(primaryResult, originalConcepts, replayConcepts);
     if (violations.length === 0) {
       recordExplanation({ ...logBase, source: "ai", whyBestIsBetter: primaryResult.whyBestIsBetter });

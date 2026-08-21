@@ -12,29 +12,48 @@ datasource db {
 // something local to hang off, and is created the first time an
 // authenticated user is seen (see src/server/auth.ts).
 model User {
-  id String @id @default(cuid())
+  id             String         @id @default(cuid())
   // Display name only. No longer unique and no longer a login identifier:
   // two people may reasonably both be "Om", and identity is proven by
   // Supabase now, not by typing a name.
-  name String
+  name           String
   // The Supabase auth user id — the stable link between this row and the
   // identity. Nullable because local fixtures and the seed script create
   // users that never authenticate; a real signed-in user always has one.
-  supabaseUserId String? @unique
+  supabaseUserId String?        @unique
   // Mirrored from Supabase for display and the admin view, so listing
   // accounts doesn't require a call out to the auth API.
-  email     String?        @unique
-  createdAt DateTime       @default(now())
-  accounts  ChessAccount[]
-  games     Game[]
+  email          String?        @unique
+  createdAt      DateTime       @default(now())
+  accounts       ChessAccount[]
+  games          Game[]
+
+  // Stripe Billing. Stripe is the source of truth for every field below;
+  // these columns are a local mirror kept in step by the webhook, so
+  // rendering a page never costs a call out to the Stripe API. The customer
+  // id is written before Checkout starts, so the customer -> user mapping
+  // already exists even if the webhook lands before the browser redirects
+  // back.
+  stripeCustomerId     String?   @unique
+  stripeSubscriptionId String?   @unique
+  // Stripe's own status string, stored verbatim rather than reduced to a
+  // boolean: "past_due" has to be distinguishable from "canceled" because
+  // one keeps access and the other doesn't (see src/lib/plans.ts).
+  // Null means this account has never subscribed.
+  subscriptionStatus   String?
+  subscriptionPriceId  String?
+  // End of the paid period. Read from the subscription's ITEM, not the
+  // subscription — see src/server/billing/sync.ts.
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean   @default(false)
 }
 
 model ChessAccount {
-  id       String @id @default(cuid())
-  platform String // "chesscom" (lichess later)
-  username String
-  userId   String
-  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           String    @id @default(cuid())
+  platform     String // "chesscom" (lichess later)
+  username     String
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   // Set after each successful auto-sync, so future syncs can report "N new
   // games" instead of just re-checking everything from scratch.
   lastSyncedAt DateTime?
@@ -79,28 +98,39 @@ model Game {
   summary            String?
   summaryGeneratedAt DateTime?
 
+  // When this game consumed one of its owner's monthly analysis allowance.
+  // Written once, at dispatch, by POST /api/games/[id]/analyze, and only
+  // when it is null — so re-analysing a game you already paid for is free,
+  // forever. Cleared again if the analysis run fails, so a crashed engine
+  // isn't billed. The seeded demo game never has one: it's inserted
+  // pre-analyzed and never passes through the route, so it costs nothing
+  // and counts for nothing.
+  analysisChargedAt DateTime?
+
   createdAt  DateTime    @default(now())
   moves      GameMove[]
   keyMoments KeyMoment[]
 
   @@unique([userId, platform, externalId])
+  // The monthly usage count is a range scan over exactly this pair.
+  @@index([userId, analysisChargedAt])
 }
 
 model GameMove {
-  id         String      @id @default(cuid())
-  gameId     String
-  game       Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  ply        Int // 1-based half-move index
-  moveNumber Int
-  color      String // "white" | "black"
-  san        String
-  uci        String
-  fenBefore  String
-  fenAfter   String
+  id           String      @id @default(cuid())
+  gameId       String
+  game         Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  ply          Int // 1-based half-move index
+  moveNumber   Int
+  color        String // "white" | "black"
+  san          String
+  uci          String
+  fenBefore    String
+  fenAfter     String
   // Seconds remaining on the mover's clock AFTER this move, parsed from the
   // PGN's %clk annotations when present (e.g. Chess.com imports).
   clockSeconds Int?
-  keyMoments KeyMoment[]
+  keyMoments   KeyMoment[]
 
   @@unique([gameId, ply])
 }
@@ -127,10 +157,10 @@ model KeyMoment {
   evalAfterCp    Int?
   evalAfterMate  Int?
 
-  selectionReason String
-  classification  String // BEST | GOOD | INACCURACY | MISTAKE | BLUNDER | MISSED_OPPORTUNITY | FORCED
+  selectionReason    String
+  classification     String // BEST | GOOD | INACCURACY | MISTAKE | BLUNDER | MISSED_OPPORTUNITY | FORCED
   principalVariation String // JSON array of SAN moves for the best line
-  conceptHighlights String @default("[]") // JSON array of {concept, note, squares}
+  conceptHighlights  String @default("[]") // JSON array of {concept, note, squares}
 
   // Importance ranking, computed at analysis time.
   importanceScore Int    @default(0) // 0-100
@@ -197,12 +227,26 @@ model AnalysisCache {
 // User — someone joining the waitlist hasn't created an account, and may
 // never; the two lists are independent.
 model WaitlistSignup {
-  id String @id @default(cuid())
+  id        String   @id @default(cuid())
   // Stored normalized (trimmed + lowercased) so the unique constraint
   // actually dedupes — "Me@Example.com " and "me@example.com" are one person.
-  email String @unique
+  email     String   @unique
   // Which CTA the signup came from, so separate placements can be compared
   // later without a schema change.
   source    String   @default("landing")
   createdAt DateTime @default(now())
+}
+
+// One row per Stripe webhook event we've already acted on.
+//
+// Stripe retries a failed delivery for up to 3 days and makes no ordering
+// guarantee, so the same event arrives more than once as a matter of course.
+// Inserting the event's own id first, and treating a unique-constraint
+// collision as "already handled", is what makes a redelivery a no-op rather
+// than a double-provision — the same idempotent framing as WaitlistSignup's
+// upsert.
+model StripeEvent {
+  id          String   @id // Stripe's own evt_... id
+  type        String
+  processedAt DateTime @default(now())
 }

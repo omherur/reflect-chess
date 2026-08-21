@@ -54,7 +54,59 @@ export interface ParsedMove {
   clockSeconds?: number | null;
 }
 
+/**
+ * The layer a player reads first: the whole verdict in three short lines,
+ * scannable in a few seconds so a game can be reviewed at the pace of a
+ * game rather than the pace of an essay.
+ *
+ * Short is not the same as shallow — each line still has to name the
+ * concrete thing (a square, a piece, a principle), because a summary that
+ * only says "this was inaccurate" leaves the player exactly where they
+ * started. The deeper fields below stay one click away for when three lines
+ * genuinely aren't enough.
+ */
+export interface ExplanationSummary {
+  /** What actually happened, in one sentence. */
+  headline: string;
+  /** Why the engine's move is stronger, in one sentence. */
+  betterMove: string;
+  /** The lesson, in a short clause. */
+  takeaway: string;
+}
+
+/**
+ * One move of the engine's line with a short note on what it accomplishes.
+ *
+ * The engine's best line routinely opens with something that looks wrong —
+ * conceding a pawn, allowing a capture — and raw notation gives a player no
+ * way to tell a blunder from a deliberate concession. "Nd7 Qxd5 a6 Nc3 c6"
+ * reads as "let the queen take my pawn for free" unless someone points out
+ * that c6 then hits the queen and the knight at once.
+ */
+export interface LineStep {
+  /** Verbatim from the principal variation, in order — never a move the engine didn't give. */
+  move: string;
+  /** A few words on what this move accomplishes. */
+  note: string;
+}
+
 export interface StructuredExplanation {
+  /**
+   * Optional only for backwards compatibility: explanations generated
+   * before the summary layer existed are stored as JSON on the reflection
+   * and can't gain fields retroactively. Read it through
+   * `explanationSummary()` in lib/explanation-summary.ts, which derives a
+   * summary from the deep fields when this is absent, rather than testing
+   * for it at each call site.
+   */
+  summary?: ExplanationSummary;
+  /**
+   * Optional: absent on explanations generated before it existed, on
+   * template-generated ones (which have no way to say what a move
+   * accomplishes), and whenever the model's steps didn't match the engine's
+   * actual line. The UI falls back to plain notation.
+   */
+  lineWalkthrough?: LineStep[];
   whatYourMoveDid: string;
   whatItMissed: string;
   whyBestIsBetter: string;
