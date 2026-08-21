@@ -38,7 +38,8 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
 - **react-chessboard ^5.10.0** for the interactive board; a hand-rolled unicode-glyph `MiniBoard` (no react-chessboard) for lightweight dashboard thumbnails.
 - **Stockfish 18 WASM** via a Node child process (`src/server/engine/runner.cjs`, UCI protocol). Wrapped in `src/server/engine/engine.ts`'s `StockfishService` — **a single lazy global singleton with one serialized request queue**. This is important context for the open batch-analysis issue below (see §7).
 - **Claude API** (`@anthropic-ai/sdk`) for personalized explanation generation — model is **`claude-sonnet-5`** (upgraded from Haiku; Sonnet was deliberately chosen since explanation quality is the core product value). Automatic fallback to a deterministic template provider on any failure or missing key. **`ANTHROPIC_API_KEY` is configured and the AI path is verified working live** (see §6 — this was broken for two independent reasons, both fixed). **Important:** `claude-sonnet-5` defaults to adaptive extended thinking when the `thinking` param is omitted, and thinking tokens draw from the same `max_tokens` budget as the answer — always pass `thinking: { type: "disabled" }` on calls that need a reliable structured-JSON answer (see `src/server/explain/claude-provider.ts` and `src/server/summary/claude-provider.ts`), or a call can silently return empty text with `stop_reason: "max_tokens"`.
-- **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
+- **Stripe** (`stripe` ^22) for billing — Stripe-hosted Checkout plus the Customer Portal, so no card data ever reaches this app and there is no publishable key in the repo. **The installed SDK pins API version `2026-07-29.dahlia`, where `Subscription.current_period_end` no longer exists** — it moved onto the subscription's *items*, and reading the old field yields `undefined` and an Invalid Date. Same story for `Invoice.subscription`, now `invoice.parent.subscription_details.subscription`. Both are handled in `src/server/billing/`; see §11.
+- **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9. One exception, and it's one-way: a `public.subscriptions` table in Supabase receives a **reporting mirror** of billing state, written by the app and never read back (§11).
 - **Supabase Auth** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password login — **identity only**; all application data stays in local Prisma/SQLite. See §9.
 - **next-themes** for dark mode (wired to a `ThemeProvider` + header toggle button).
 - **Vitest** for tests (359 tests / 22 files as of this writing, all passing), colocated `*.test.ts` files. Environment is `node` and `include` is `src/**/*.test.ts` — there is **no jsdom and no testing-library**, so component behavior is not unit-testable as configured; verify UI changes in the running app instead.
@@ -60,6 +61,9 @@ ReflectChess is a chess self-reflection tool. Its core mechanic: capture what a 
   - `followUpQuestion` / `followUpAnswer` (nullable strings) — populated only when the initial `thoughts` answer was judged "thin" by `src/server/explain/followup.ts`'s `isThinReflection()` (word-count + filler-phrase heuristic), and the user then answered the one generated follow-up. Never re-asked for the same key moment.
   - `replayEvalCp`/`replayEvalMate`/`replayVerdict`, `explanation` (JSON-serialized `StructuredExplanation`, generated once at reflect-time, personalized to the specific reasoning + replay move).
 - **AnalysisCache** — engine result cache keyed by `(fen, settings)`, shared across all games/users.
+- **Billing columns on `User`** — `stripeCustomerId`, `stripeSubscriptionId`, `subscriptionStatus`, `subscriptionPriceId`, `currentPeriodEnd`, `cancelAtPeriodEnd`. A **mirror**, not a source of truth: Stripe owns all of it and the webhook keeps these in step, so rendering a page never costs an API call. `subscriptionStatus` stores Stripe's string verbatim rather than a boolean, because `past_due` has to be distinguishable from `canceled` — one keeps access, the other doesn't.
+- **`Game.analysisChargedAt`** — the entire usage meter. Set once, at dispatch, by `POST /api/games/[id]/analyze`, and only when null, so re-analysing a game you already paid for is free forever. Cleared if the run fails, so a crashed engine isn't billed. The seeded demo game never has one — it's inserted pre-analyzed and never passes through the route, which is why **no `platform === "demo"` filter exists anywhere in the billing code, and adding one would be dead code.**
+- **StripeEvent** — one row per handled webhook event, keyed on Stripe's own `evt_…` id. Stripe retries for up to 3 days with no ordering guarantee, so the unique id is what makes a redelivery a no-op.
 - **WaitlistSignup** — a pre-launch email signup from the landing page. Deliberately **not** related to `User`: someone on the waitlist has no account and may never make one. `email` is unique and stored normalized (trimmed + lowercased via `src/lib/email.ts`, so casing/whitespace variants are one person); `source` records which CTA it came from so placements can be compared without a schema change.
 
 ---
@@ -137,6 +141,9 @@ Two SVG gotchas this cost time on, worth not rediscovering: a `*/` inside a bloc
 | Waitlist capture | **Working, new** | `POST /api/waitlist` + `WaitlistForm` in **two** places — the hero (`source: "landing-hero"`, directly under the two CTAs) and the closing section (`source: "landing-closing"`), which is what the `source` column is for. Public route (no session), validated by `src/lib/email.ts` on both sides, `upsert`-based so re-signing-up is a success (`alreadyOnList: true`) rather than an error and the original signup time survives. Verified end to end through the real UI; there is **no admin view of signups yet** — read them with Prisma |
 | Demo game seeded on signup | **Working, new** | Every **new** account gets one fully analyzed game inserted at signup, so the landing CTA ("your first game comes back analyzed") is true on arrival instead of showing an empty dashboard. `src/server/demo/seed-demo-game.ts` inserts from `src/server/demo/demo-game.ts` — a checked-in fixture exported from a real analysis run (`prisma/export-demo-game.ts` regenerates it), **not** a copy of a DB row, because a fresh production database has nothing to copy and signup must not depend on the engine. Stored as `platform: "demo"` / `externalId: "demo-seed-v1"`, which `platformLabel` renders as "Demo game" so it can't be mistaken for the user's own. Idempotent (unique on `[userId, platform, externalId]`) and it **never throws** — a seeding failure must not break a login. `/api/auth/login` is no longer an `upsert`, because upsert can't tell you whether it created the account |
 | Admin area (signups + waitlist) | **Working, new** | `/admin` — every account (name, signup time, games, reflections, linked Chess.com username) and every waitlist signup (email, source, time), plus five summary counters. **Gated by an `ADMIN_KEY` secret, not by identity** — see §8. Server-rendered, and the data is only queried *after* the gate passes, so a locked visitor's HTML contains no names or emails at all rather than fetching and hiding them |
+| **Subscriptions & usage limits** | **Working, new** | Free = 5 games analyzed per calendar month (UTC), Pro = **$8/month for 30**. See §11. Metered on *analyze*, not import. Verified live against the real test-mode Stripe account end to end |
+| Upgrade surfaces (plan chip, dashboard prompt, plan comparison) | **Working, new** | Escalating rather than uniformly loud — see §11. All four prompt states plus both chip states rendered and checked in light and dark |
+| Stripe webhook | **Working, new** | `/api/stripe/webhook`, signature-verified over the raw body, deduplicated on the event id, re-fetches the subscription rather than trusting the payload. Verified with genuinely-signed events: provision, replay, cancel-at-period-end, deletion |
 | Explanation provenance debug view | **Working** | `/admin/explanations` — shows the last N generated explanations, whether each came from Claude / was grounding-patched / fell back to the template, and why, with an auto-refreshing table and a fallback-ratio warning banner. **Now behind the same `ADMIN_KEY` gate** (it was previously readable by any signed-in user); both the page and `/api/admin/explanations` are gated, since gating only the page would leave the entries one fetch away |
 
 ---
@@ -190,8 +197,11 @@ Note: hydration errors in Next 16 dev surface **only in the dev-tools overlay**,
 1. **Voice input** has only been feature-detection-tested (mic icon appears/disappears correctly); actual speech-to-text transcription accuracy has not been verified live (no real microphone input in this environment).
 2. **Concept-relevance filter is sometimes overly strict.** `filterRelevantConcepts` occasionally drops a real, correct tactic (observed: a genuine pin) because its squares weren't judged "connected enough" to the move/PV. With an empty verified-concept list, any tactical word the model uses then counts as a grounding violation and gets patched back to template text. Still unfixed, but it now hurts less: `applyGrounding` prefers the model's own *surviving* prose over the template when replacing a summary line (§10).
 3. **The signed-in reveal flow has not been clicked through since the §10 changes.** The summary layer, the "Explain more" toggle and the progress bar were verified by unit tests, by a real Claude run against real dev-DB moments, and by confirming the route streams incrementally — but not by a human-eye pass of the rendered panel, because doing so requires signing in and Claude may not enter a password. Worth one look.
-4. General note: `src/proxy.ts` gates **everything** not in `PUBLIC_PREFIXES` behind a session — any new route meant for signed-out visitors (a public API, a static asset served from `app/`) must be added there, or it silently 401s/redirects to `/login`. This bit both `/api/waitlist` and `/icon.svg` when they were added.
-5. General note: after any schema change, remember the non-interactive `prisma migrate dev` limitation in §2 — use the manual diff+deploy workaround, not `migrate dev` directly. Also remember: **the running dev server's Prisma Client is loaded once at process start** — after `npx prisma generate`, the dev server must be restarted (not just hot-reloaded) or it'll throw "Unknown field" errors against the new schema.
+4. General note: `src/proxy.ts` gates **everything** not in `PUBLIC_PREFIXES` behind a session — any new route meant for signed-out visitors (a public API, a static asset served from `app/`) must be added there, or it silently 401s/redirects to `/login`. This bit both `/api/waitlist` and `/icon.svg` when they were added, and `/api/stripe/webhook` is now on the list for the same reason — Stripe sends no cookie, so gating it would 401 every event and subscriptions would silently never provision.
+5. **Local webhooks need `stripe listen` running.** Test-mode billing is otherwise fully set up (§11). The signing secret in `.env` belongs to the CLI, so events only arrive while `stripe listen --forward-to localhost:3000/api/stripe/webhook` is up; with it stopped, checkout still charges but nothing provisions. **Production needs its own registered endpoint and its own, different secret.**
+6. **The billing components have had a human-eye pass; the signed-in pages themselves have not.** Every upgrade surface (`PlanBadge`, all four `UpgradePrompt` states, `PlanComparison`) was rendered and checked in both light and dark via a temporary unauthenticated preview route, which found two real defects — a "Recommended" badge clipped in half by the `Card` primitive's `overflow-hidden`, and the app's only British spelling ("Analysing"). What has *not* been seen is those components in situ on the real `/billing` page and dashboard with a live session, since that needs a password. Same limitation as note 3.
+7. **`tsconfig.json` now excludes `lumos/`.** That directory is an untracked, self-contained Next scaffold that happens to sit inside the repo; the root `**/*.tsx` include was pulling it in and failing `next build` on its own `~/*` alias. Unrelated to this app — delete it whenever you want the tree tidy.
+8. General note: after any schema change, remember the non-interactive `prisma migrate dev` limitation in §2 — use the manual diff+deploy workaround, not `migrate dev` directly. Also remember: **the running dev server's Prisma Client is loaded once at process start** — after `npx prisma generate`, the dev server must be restarted (not just hot-reloaded) or it'll throw "Unknown field" errors against the new schema.
 
 ---
 
@@ -313,3 +323,195 @@ Submitting a reflection runs a Stockfish evaluation and then a Claude call — o
 - Stage labels are ground truth from the server; only the movement between two announcements is estimated. Each stage eases toward a ceiling short of 100, so the bar can never sit at "done" while work is still running.
 - `toClientView` is still the only serializer — streaming changed how the verdict reaches the client, not what the client may see.
 - Verified with a temporary public route that Next 16 + Turbopack flushes each event as it's enqueued rather than buffering the response whole.
+
+---
+
+## 11. Billing — Subscriptions and the Usage Meter
+
+Free accounts may analyze **5 games per calendar month (UTC)**; **Pro is $8/month for 30**. Payment is Stripe
+Billing via **Stripe-hosted Checkout**, with the **Customer Portal** for changing a card or cancelling — so
+this app renders no card field, holds no card data, and needs no publishable key.
+
+### What is metered, and why it's analysis
+
+Analysis is a depth-10 scan of every position plus depth-16 multi-PV on each key moment, then a Claude call per
+reflection. Importing is a PGN parse. **Chess.com sync also runs automatically on every dashboard mount** and
+pulls up to 15 games unasked (`SYNC_LIMIT` in `src/app/api/sync/route.ts`), so metering imports would drain an
+allowance for simply opening the app. Import and sync are therefore free and unlimited.
+
+### Usage is derived, never counted
+
+There is no counter column and no reset job. Usage is `COUNT(*) FROM Game WHERE userId = ? AND
+analysisChargedAt >= <start of this UTC month>`. Nothing can drift, and the 1st of the month needs no cron.
+
+### The one thing not to "simplify": `chargeAnalysis`
+
+`src/server/billing/quota.ts` claims a slot with a **single raw `UPDATE` whose `WHERE` clause contains the
+count**. This looks like something a `$transaction` with a `count()` then an `update()` would express more
+readably. It is not equivalent, and the readable version is broken:
+
+> The dashboard's "Analyze all" fires `Promise.all` of N parallel POSTs. Measured on this codebase: with a
+> read-then-write, **10 simultaneous claims against a limit of 5 all succeeded — a 100% overshoot.** Prisma
+> does not serialize those the way you'd hope. Folding the count into the UPDATE means SQLite evaluates it
+> while holding the write lock for that one statement, and exactly as many succeed as there was room for.
+
+`src/server/billing/quota.test.ts` has a test that fires `limit + 5` concurrent claims and asserts exactly
+`limit` are granted. **If you rewrite `chargeAnalysis`, that test is the one that matters** — and it was
+confirmed to genuinely fail against a naive implementation, so it isn't decorative.
+
+The same statement is why re-analysis is free (`analysisChargedAt IS NULL`), and the analyze route's `.catch()`
+calls `refundAnalysis` so a crashed engine run isn't billed.
+
+### Stripe API version traps (both cost real time)
+
+The SDK pins `2026-07-29.dahlia`:
+
+1. **`Subscription.current_period_end` does not exist.** It's `subscription.items.data[].current_period_end`.
+   Confirmed live: a real test-mode subscription returned `undefined` for the top-level field. Reading it would
+   store `new Date(undefined * 1000)` — an Invalid Date, i.e. a plan that expired in 1970. `periodEndFrom()` in
+   `src/server/billing/sync.ts` takes the latest across items.
+2. **`Invoice.subscription` does not exist.** It's `invoice.parent.subscription_details.subscription`.
+   `subscriptionIdFromInvoice()` in `src/server/billing/webhook-events.ts` checks that first and the legacy
+   field second.
+
+### Access rule
+
+`planForStatus()` in `src/lib/plans.ts` grants Pro for `active`, `trialing` and **`past_due`** — `past_due`
+means Stripe is still retrying the card, and cutting access at the first decline punishes someone for an
+expiring card. Per Stripe's guidance, revoke on `canceled` and `unpaid`, by which point payment has already
+been retried to exhaustion. Anything unrecognised (including a status Stripe adds later) **fails closed to
+Free**.
+
+### The webhook
+
+`/api/stripe/webhook` — four things are load-bearing:
+
+- **It's in `PUBLIC_PREFIXES`.** Stripe carries no Supabase cookie. The signature check authenticates it instead.
+- **Raw body via `req.text()`**, not the `req.json().catch(...)` idiom used everywhere else — verification
+  hashes the exact bytes, and re-serializing fails every time.
+- **A bad signature is 400, never 500.** Stripe retries 5xx for three days.
+- **Events are claimed by inserting `StripeEvent`** before any work; a unique collision means "already
+  handled". On a handler failure the row is deleted again, so a transient error isn't permanently deduplicated
+  away.
+
+It **re-fetches** the subscription by id rather than trusting the event payload, which makes ordering
+irrelevant — a late `updated` can't resurrect a cancelled subscription.
+
+### Client-side: responses must be read
+
+`dashboard-view.tsx`'s `startAnalysis` and `game-review.tsx`'s used to fire requests and **discard every
+response status**, flipping cards to "ANALYZING" optimistically. That was harmless while analysis was
+unlimited; with a paywall it made refusals invisible and the UI assert something untrue. Both now inspect each
+response and only advance the games that actually started. **Don't reintroduce the optimistic version.**
+
+### Where upgrading is surfaced, and how hard it pushes
+
+Three surfaces, deliberately escalating rather than uniformly loud — a permanent hard sell inside a tool built
+for quiet thinking would fight the whole "old chess book" design language:
+
+| Surface | Behaviour |
+|---|---|
+| `PlanBadge` (header, `layout.tsx`) | Always visible. Free accounts see `Free · N left` linking to `/billing`; it turns oxblood at zero. Subscribers get a plain `Pro` chip with **no number and no link** — a paying customer shouldn't be shown a running meter of their allowance. |
+| `UpgradePrompt` (dashboard) | Four states off one number: **calm** (3+ left) is a status line with a small outline button; **nudge** (1–2 left) and **spent** (0) become a real pitch with the large CTA; **pro** is the meter alone, no upsell. |
+| `PlanComparison` (`/billing`) | Free vs Pro side by side, Pro carrying tint + ring + "Recommended" + the only filled button. |
+
+Rules that were applied and are worth keeping:
+
+- **Every number is derived.** The remaining count, reset date, `6×` multiplier and `27¢`-a-game figure all come
+  from `PLANS` and the real quota, so the marketing copy cannot drift from what's charged and enforced. The
+  per-game framing is `formatPerGamePrice()`.
+- **No invented social proof.** No user counts, testimonials, countdowns or fake urgency. The scarcity shown
+  ("2 games left") is real and server-enforced, which is the only reason it deserves attention. One fabricated
+  number here would undermine every honest one.
+- **One CTA per page.** `/billing`'s top card deliberately has *no* upgrade button for free users; the single
+  call to action lives in the comparison below.
+- **Risk reversal is factual.** "Cancel any time — you keep Pro till the period ends" was checked against the
+  live portal configuration, which has `subscription_cancel.mode = at_period_end`.
+- CTA styling comes from `src/lib/cta.ts` (`PRIMARY_CTA_CLASS`), shared with the landing hero so the most
+  important button looks like one thing product-wide. It's built on `--primary`, **not** a hand-rolled
+  gradient, so it keeps the contrast guarantees `src/lib/contrast.test.ts` enforces.
+- `Card` sets `overflow-hidden`; a negatively-offset badge on it gets clipped. Put such tags in normal flow.
+
+### Stripe CLI and the local webhook
+
+The CLI is installed (`brew`-managed, `stripe` on PATH). It never needed an interactive `stripe login` — every
+command takes `--api-key`, which is how the signing secret was fetched:
+
+```bash
+stripe listen --api-key "$STRIPE_SECRET_KEY" --print-secret
+stripe listen --api-key "$STRIPE_SECRET_KEY" --forward-to localhost:3000/api/stripe/webhook
+```
+
+Verified end to end with `stripe trigger customer.subscription.created`: real events delivered, all `200`. The
+`[billing] Subscription … has no matching local user — ignoring` line that appears is **correct** — `stripe
+trigger` invents a customer with no local account, and that's the graceful-ignore path doing its job.
+
+The **Customer Portal needed no activation in test mode** — Stripe auto-creates a default configuration
+(`subscription_cancel` at period end, payment-method update, invoice history all on). Live mode may differ.
+
+### The Supabase mirror (reporting only)
+
+Subscription state is **also** written to a `public.subscriptions` table in Supabase, so billing can be queried
+from the Supabase dashboard. Read the direction of travel carefully, because it's the only thing that keeps this
+safe:
+
+> Stripe is the source of truth → the local Prisma `User` row is the application's copy → the Supabase table is
+> a copy of *that*. Nothing reads it back. If it disagrees with the app, **the table is wrong.**
+
+This is deliberately a second copy of the same truth, which can drift; that was an accepted trade for dashboard
+queryability. Three properties make it tolerable, and none should be removed:
+
+- **It cannot fail a webhook.** `mirrorSubscription()` swallows every error and is bounded to 3s. If
+  provisioning depended on Supabase being reachable, a Supabase outage would silently stop paying customers
+  getting access — much worse than a stale reporting table. Verified live: with the key unset, `applySubscription`
+  runs the mirror, logs one warning, and completes normally.
+- **It hangs off the single write path.** `applySubscription()` in `sync.ts` is the only place subscription state
+  is written, so the mirror is attached there rather than per webhook event type.
+- **Drift is repairable.** `npx tsx scripts/reconcile-supabase-subscriptions.ts` rebuilds every row from the
+  local database. Upsert on `app_user_id`, so re-running is a no-op. Run it after adding the key, and after any
+  incident.
+
+**RLS is enabled and is not optional.** The anon key ships to every browser by design; without the
+`auth.uid() = supabase_user_id` select policy it would read every customer's billing state. There are no
+insert/update/delete policies — only the service role writes, and it bypasses RLS.
+
+**This is live and verified.** The table exists on project `jofrvoreujywlsvwallm` and
+`SUPABASE_SERVICE_ROLE_KEY` is set in `.env`. Confirmed end to end: the reconcile script wrote the existing
+subscriber (`Wrote 1/1`), the row read back matching local state field for field, and then a genuine
+`customer.subscription.updated` from Stripe advanced `synced_at` through the webhook — so the mirror maintains
+itself rather than needing the script.
+
+Re-creating it elsewhere is two manual steps, because there's no Supabase CLI here and DDL can't be run through
+the REST API at all (not even with the service-role key): paste
+`supabase/migrations/20260818210000_subscriptions_mirror.sql` into the Supabase SQL editor, then set
+`SUPABASE_SERVICE_ROLE_KEY` (server-only — **never** `NEXT_PUBLIC_`, since that key ignores every RLS policy)
+and restart. Unset, mirroring is simply off and nothing else changes.
+
+### Setup
+
+Env: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID_PRO`, `NEXT_PUBLIC_APP_URL` (all documented
+in `.env.example`). The first two must never carry a `NEXT_PUBLIC_` prefix. Env is read at process start —
+restart the server.
+
+The test-mode Product/Price already exist in the connected Stripe account:
+`prod_V6ClsNsHCWwMg2` / `price_1U60LxLtX1sQHTj00mLw8UPw` ($8.00 USD monthly).
+
+### Managed Payments requires a product tax code
+
+This account has **Managed Payments enabled by default**, which makes `tax_code` mandatory on any Product sold
+through Checkout. Without it, `checkout.sessions.create` fails with:
+
+> `Invalid line_items[0]: the product tax code is missing.`
+
+The Pro product is set to **`txcd_10103000` — "Software as a service (SaaS) - personal use"**, which fits a
+browser-delivered tool sold to individual players. **If you ever sell to clubs or businesses, or create a
+second product, revisit this** — `txcd_10103001` is the business-use equivalent, and a new product with no tax
+code will fail checkout the same way. The alternative escape hatch is passing
+`managed_payments: { enabled: false }` on the session, which turns off Stripe handling tax for you; setting the
+tax code is the better answer.
+
+Because a misconfiguration like this surfaces as a dead button, `checkout` and `portal` now append Stripe's own
+message to their 502 body **outside production** (`stripeErrorMessage()`), while real users still see the plain
+sentence. The first version swallowed it, which is what made this take a debugging round trip.
+
+All four env vars are set for test mode. **`stripe listen` has to be running for local webhooks** — see above.
