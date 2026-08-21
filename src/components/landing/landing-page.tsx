@@ -3,25 +3,9 @@ import { Button } from "@/components/ui/button";
 import { ExplanationCard } from "@/components/explanation-card";
 import { LogoFigure, LogoWordmark } from "@/components/brand/logo";
 import { WaitlistForm } from "@/components/landing/waitlist-form";
+import { PRIMARY_CTA_CLASS, SECONDARY_CTA_CLASS } from "@/lib/cta";
 
-/**
- * The one thing on the page that has to be unmissable. Deliberately built on
- * --primary rather than a custom gold gradient: the theme tokens are already
- * contrast-checked in both modes (see src/lib/contrast.test.ts), and a
- * hand-rolled gradient here would quietly opt out of that. The "pop" comes
- * from size, a coloured shadow, a ring, and lift on hover instead.
- */
-const PRIMARY_CTA_CLASS =
-  "h-12 w-full px-8 text-base font-semibold shadow-lg shadow-primary/30 ring-2 ring-primary/25 " +
-  "transition-transform hover:-translate-y-0.5 hover:shadow-xl hover:shadow-primary/40 sm:w-auto";
 
-/**
- * Still clearly second to the primary, but not a flat outline that reads as
- * disabled next to it — both CTAs are meant to be noticed.
- */
-const SECONDARY_CTA_CLASS =
-  "h-12 w-full border-primary/45 px-8 text-base font-semibold shadow-sm transition-transform " +
-  "hover:-translate-y-0.5 hover:border-primary/70 hover:bg-primary/10 sm:w-auto";
 import {
   Download,
   MessageCircleHeart,
