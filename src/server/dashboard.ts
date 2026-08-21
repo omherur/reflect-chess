@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/server/auth";
+import { getQuota, toQuotaView } from "@/server/billing/quota";
+import type { QuotaView } from "@/lib/plans";
 
 export interface KeyMomentThumbnail {
   fen: string;
@@ -49,6 +51,13 @@ export interface DashboardData {
     fullyReviewed: number; // analyzed, all key moments REVIEWED
   };
   momentum: DashboardMomentum;
+  /**
+   * This month's analysis allowance. Served alongside the games rather than
+   * from its own endpoint so the meter can't drift out of step with the
+   * cards — the dashboard already refetches this payload whenever a batch
+   * finishes, which is exactly when usage has changed.
+   */
+  quota: QuotaView;
 }
 
 const MILESTONE_STEP = 5;
@@ -141,5 +150,6 @@ export async function getDashboardData(): Promise<DashboardData> {
       nextMilestone,
       remainingToMilestone: nextMilestone - totalReflections,
     },
+    quota: toQuotaView(await getQuota(user)),
   };
 }

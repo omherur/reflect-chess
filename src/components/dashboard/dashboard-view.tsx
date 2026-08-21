@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select";
 import { ClearAllGamesButton } from "@/components/dashboard/clear-all-games-button";
 import { MiniBoard } from "@/components/dashboard/mini-board";
+import { UpgradePrompt } from "@/components/billing/upgrade-prompt";
 import { Input } from "@/components/ui/input";
 import {
   formatDate,
@@ -53,7 +54,7 @@ export function DashboardView({ initialData }: { initialData: DashboardData }) {
   const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const { games, counts, momentum } = data;
+  const { games, counts, momentum, quota } = data;
 
   const visibleGames = useMemo(() => {
     let list = games;
@@ -86,18 +87,75 @@ export function DashboardView({ initialData }: { initialData: DashboardData }) {
     if (res.ok) setData(await res.json());
   }
 
+  /**
+   * Start analysis for a batch.
+   *
+   * Every response is inspected, and only the games that actually started
+   * are flipped to ANALYZING. This used to fire the requests and discard the
+   * results, which was harmless while analysis was unlimited — but with a
+   * monthly allowance the server can refuse (402), and optimistically
+   * showing every card as "analyzing" would make the paywall invisible and
+   * leave the UI asserting something untrue.
+   *
+   * The requests deliberately still go out together: the server hands out
+   * slots atomically, so it decides how many of a too-large batch succeed,
+   * rather than the client guessing.
+   */
   async function startAnalysis(ids: string[]) {
     if (ids.length === 0) return;
     setStarting(true);
     try {
-      await Promise.all(ids.map((id) => fetch(`/api/games/${id}/analyze`, { method: "POST" })));
-      setData((d) => ({
-        ...d,
-        games: d.games.map((g) =>
-          ids.includes(g.id) ? { ...g, analysisStatus: "ANALYZING", analysisProgress: 0 } : g
-        ),
-      }));
-      toast.success(`Started analysis for ${ids.length} game${ids.length === 1 ? "" : "s"}.`);
+      const outcomes = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const res = await fetch(`/api/games/${id}/analyze`, { method: "POST" });
+            const body = await res.json().catch(() => null);
+            return { id, ok: res.ok, status: res.status, body };
+          } catch {
+            return { id, ok: false, status: 0, body: null };
+          }
+        })
+      );
+
+      const started = outcomes.filter((o) => o.ok).map((o) => o.id);
+      const blocked = outcomes.filter((o) => o.status === 402);
+      const failed = outcomes.filter((o) => !o.ok && o.status !== 402);
+
+      if (started.length > 0) {
+        setData((d) => ({
+          ...d,
+          games: d.games.map((g) =>
+            started.includes(g.id) ? { ...g, analysisStatus: "ANALYZING", analysisProgress: 0 } : g
+          ),
+        }));
+        toast.success(`Started analysis for ${started.length} game${started.length === 1 ? "" : "s"}.`);
+      }
+
+      if (blocked.length > 0) {
+        // Every 402 carries the same allowance snapshot, so one message covers
+        // the batch. Reuse the server's own wording rather than rephrasing it.
+        const quota = blocked[0].body?.quota as DashboardData["quota"] | undefined;
+        if (quota) setData((d) => ({ ...d, quota }));
+        toast.error(
+          blocked[0].body?.error ?? "You've used this month's analysis allowance.",
+          {
+            description:
+              started.length > 0
+                ? `${blocked.length} game${blocked.length === 1 ? "" : "s"} couldn't be started.`
+                : undefined,
+            action: { label: "Upgrade", onClick: () => router.push("/billing") },
+          }
+        );
+      }
+
+      if (failed.length > 0) {
+        toast.error(
+          `Couldn't start ${failed.length} game${failed.length === 1 ? "" : "s"}. Try again.`
+        );
+      }
+
+      // Pick up the new usage count (and anything else that moved).
+      if (started.length > 0) void refetch();
       setSelected(new Set());
     } finally {
       setStarting(false);
@@ -282,6 +340,11 @@ export function DashboardView({ initialData }: { initialData: DashboardData }) {
         <StatCard label="Fully reviewed" value={counts.fullyReviewed} />
       </div>
 
+      {/* The allowance, shown before the "Analyze all" button rather than
+          after a refusal — the point is that running out is never a surprise.
+          Escalates from a status line to a real pitch as the limit nears. */}
+      <UpgradePrompt quota={quota} />
+
       {counts.totalGames > 0 && (
         <div className="mb-4">
           <div className="mb-1 flex items-center justify-between text-sm text-stone-600">
@@ -339,8 +402,13 @@ export function DashboardView({ initialData }: { initialData: DashboardData }) {
                   onClick={() =>
                     startAnalysis(selected.size > 0 ? [...selected] : analyzableIds)
                   }
-                  disabled={starting}
+                  disabled={starting || data.quota.remaining === 0}
                   className="gap-1.5"
+                  title={
+                    data.quota.remaining === 0
+                      ? `You've analyzed all ${data.quota.limit} games included this month. Resets on ${data.quota.resetsAtLabel}.`
+                      : undefined
+                  }
                 >
                   <PlayCircle className="size-4" />
                   {selected.size > 0
