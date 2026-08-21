@@ -15,12 +15,20 @@ import { createServerClient } from "@supabase/ssr";
 // when they arrive there — they're carrying an OAuth code that hasn't been
 // exchanged for a session yet. Gating it would bounce them to /login and
 // throw the code away, failing the sign-in at the final step.
+//
+// "/api/stripe/webhook" is public for the same class of reason: Stripe is
+// not a signed-in visitor and sends no cookie, so gating it would 401 every
+// event and subscriptions would silently never provision — the failure would
+// look like Stripe not paying out rather than a routing bug. It is not
+// unauthenticated: the route verifies Stripe's signature over the raw body,
+// which is a stronger check than a session cookie.
 const PUBLIC_PREFIXES = [
   "/",
   "/login",
   "/signup",
   "/auth/callback",
   "/api/waitlist",
+  "/api/stripe/webhook",
   "/icon.svg",
 ];
 
