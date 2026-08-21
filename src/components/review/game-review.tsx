@@ -16,6 +16,7 @@ import { MomentList } from "./moment-list";
 import { MoveStrip } from "./move-strip";
 import { BrowseView } from "./browse-view";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import Link from "next/link";
 
 export function GameReview({
   gameId,
@@ -27,6 +28,9 @@ export function GameReview({
   const router = useRouter();
   const [data, setData] = useState(initialData);
   const [starting, setStarting] = useState(false);
+  // Set when the server refuses for want of allowance, so the panel can
+  // explain it in place instead of the click appearing to do nothing.
+  const [quotaBlock, setQuotaBlock] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function refetch() {
@@ -36,8 +40,22 @@ export function GameReview({
 
   async function startAnalysis() {
     setStarting(true);
+    setQuotaBlock(null);
     try {
-      await fetch(`/api/games/${gameId}/analyze`, { method: "POST" });
+      const res = await fetch(`/api/games/${gameId}/analyze`, { method: "POST" });
+      // The response status has to be read: analysis is metered now, so
+      // "started" is no longer the only possible answer, and flipping the
+      // panel to ANALYZING regardless would show a progress bar for work
+      // that was never dispatched.
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setQuotaBlock(
+          res.status === 402
+            ? (body?.error ?? "You've used this month's analysis allowance.")
+            : (body?.error ?? "Couldn't start analysis. Try again.")
+        );
+        return;
+      }
       setData((d) => ({ ...d, game: { ...d.game, analysisStatus: "ANALYZING", analysisProgress: 0 } }));
     } finally {
       setStarting(false);
@@ -139,6 +157,16 @@ export function GameReview({
             <Button size="lg" onClick={startAnalysis} disabled={starting}>
               {starting ? "Starting…" : "Analyze this game"}
             </Button>
+            {quotaBlock && (
+              <div className="flex flex-col items-center gap-3">
+                <p className="max-w-md text-sm text-destructive">{quotaBlock}</p>
+                <Link href="/billing">
+                  <Button variant="outline" size="sm">
+                    See plans
+                  </Button>
+                </Link>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
